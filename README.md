@@ -50,7 +50,7 @@ Windows 的消歧前缀塞在括号里(`耳机 (2- 蓝牙耳机A)`),且只在设
 
 ## 为什么自研
 
-只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的"切换输出设备"这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算。**Audiolite 两列测的都是 0.5.0.0 那个二进制,发新版本后须重测再引用**:
+只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的"切换输出设备"这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算。**Audiolite 两列测于 2026-09-21 与 09-22 的构建** —— 那两次构建的程序集版本都还是 0.5.0.0(版本号要到发新版才 bump),所以别拿版本号当指纹,要拿日期;新版发布后必须重测再引用:
 
 | | SoundSwitch 7.2.1 | Audiolite 刚启动 | Audiolite 连跑 6 小时 |
 |---|---|---|---|
@@ -79,7 +79,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
 
 目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `WinForms` 全程不加载——这是刚启动只有 10 MB 量级的原因。
 
-测试(55 条,覆盖点击事件判定、命名编号、状态位映射、切换判定与记账、淡出序列;条数以 `test.exe` 输出末尾为准):
+测试(覆盖点击事件判定、命名编号、状态位映射、切换判定与记账、淡出序列;条数以 `test.exe` 输出末尾为准,不在此处钉死):
 
 ```powershell
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
