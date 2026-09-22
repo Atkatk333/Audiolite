@@ -20,20 +20,27 @@ Windows 托盘音频输出切换器:点一下图标换一台输出设备。单�
 |---|---|
 | **左键** / 中键 | 切到上一台用过的设备;无历史时弹出菜单 |
 | **右键** | 列出所有在线输出设备,当前设备打勾 |
-| 每次切换 | 右下角显示目标设备名,1.6 秒后淡出 |
+| 每次切换 | 右下角显示目标设备名,1.6 秒后淡出;切换失败时显示"切换失败",不报假成功 |
 
-横幅不抢焦点:游戏里的无边框窗口不会被最小化。单实例:重复启动静默退出,不会多出托盘图标。
+横幅不抢焦点,也不会挡住点击:游戏里的无边框窗口不会被最小化,落在右下角那块区域的点击会穿透到下面的窗口。单实例:重复启动静默退出,不会多出托盘图标。
+
+鼠标悬停在图标上显示当前设备,你用 Windows 音量浮窗切换它也跟着变;"上一台"这笔账按真实默认设备对账,不会因为外部切换而卡住。
 
 ## 命令行
 
 ```
-Audiolite.exe [--tray]      托盘模式(默认,无参数即进入)
-Audiolite.exe --list        全部渲染端点(含未插入、已禁用)及其状态
-Audiolite.exe --menu        右键菜单会显示的内容
-Audiolite.exe --props       端点属性原始值(排查命名用)
-Audiolite.exe --set <ID>    直接设为指定设备
-Audiolite.exe --version     打印版本号
+Audiolite.exe                 托盘模式:左键回切上一台,右键列出在线设备
+Audiolite.exe --tray          与无参数完全等价(自启配置里用哪个都行)
+Audiolite.exe --list          全部渲染端点(含未插入、已禁用)及其状态
+Audiolite.exe --menu          右键菜单会显示的内容
+Audiolite.exe --props         端点属性原始值(排查命名用)
+Audiolite.exe --set <ID>      直接设为指定设备(真的会改声音输出)
+Audiolite.exe --bannertest <文本>  只画一次切换横幅,5 秒后自动退出
+Audiolite.exe --version       打印版本号
+Audiolite.exe --help          以上全部
 ```
+
+未知参数、缺参数一律输出到 stderr 并返回 2,不会静默起一个托盘。
 
 ## 设备命名与编号
 
@@ -72,13 +79,13 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
 
 目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `WinForms` 全程不加载——这是内存能压到 10 MB 的原因。
 
-测试(37 条,覆盖点击事件判定、命名编号、状态位映射、淡出序列):
+测试(46 条,覆盖点击事件判定、命名编号、状态位映射、切换记账、淡出序列;条数以 `test.exe` 输出末尾为准):
 
 ```powershell
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 & $csc -nologo -noconfig -r:System.dll -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
 .\test.exe
-.\test.exe --leak     # 句柄增长探针(目前只打印数字,不做断言)
+.\test.exe --leak     # 句柄增长:180 次枚举峰值与强制 GC 后的增量都必须在 +12 以内,否则退出码 1
 ```
 
 ## 已知边界
