@@ -165,8 +165,20 @@ static class TestClicks
         Case("自己切的(事件后到) -> 不动", Audiolite.NextLast("A", "C", "C"), "A");
         Case("还没种下参照 -> 不动", Audiolite.NextLast("A", null, "C"), "A");
         Case("读不到当前默认 -> 不动", Audiolite.NextLast("A", "B", null), "A");
+        // 继承来的 state.txt 完全可能是"上一台==当前默认"(v0.5 的写法会留下它)。
+        // 不清掉的话左键永远只是弹菜单,而日志里一个字都没有。
+        Case("记住的就是当前这台 -> 清空", Audiolite.NextLast("A", null, "A") ?? "null", "null");
+        Case("参照与当前一致且等于记忆 -> 清空", Audiolite.NextLast("A", "A", "A") ?? "null", "null");
         Case("ID 比对忽略大小写", Audiolite.SameId("{ABC}", "{abc}") ? "same" : "diff", "same");
         Case("ID 与 null 不同", Audiolite.SameId("{ABC}", null) ? "same" : "diff", "diff");
+
+        // 切换判定:两个 HRESULT 都成功、默认设备其实没换 —— 必须判失败。
+        Case("判定:目标已是当前设备", Audiolite.Decide("A", "A", true, "A").ToString(), "AlreadyCurrent");
+        Case("判定:HRESULT 失败", Audiolite.Decide("A", "B", false, "A").ToString(), "Failed");
+        Case("判定:hr 全 0 但回读不符", Audiolite.Decide("A", "B", true, "A").ToString(), "Failed");
+        Case("判定:回读为 null", Audiolite.Decide("A", "B", true, null).ToString(), "Failed");
+        Case("判定:回读相符", Audiolite.Decide("A", "B", true, "B").ToString(), "Switched");
+        Case("判定:切换前拿不到默认", Audiolite.Decide(null, "B", true, "B").ToString(), "Switched");
 
         // 编号必须对"这一批"整体做:排序 + 组内计数 + 拼名字一步完成。
         // 注意 Number() 会就地重排:扬声器那台装机最早,排在最前。
@@ -215,18 +227,23 @@ static class TestClicks
         Console.WriteLine((ok ? "PASS  " : "FAIL  ") + "180 次枚举后句柄必须收敛  峰值+" + worst
                           + " GC后+" + afterGc + "  阈值+" + LeakLimit);
         if (!ok) failed++;
+        RealMachineChecks();
+    }
 
-        // 掩码语义整条进了 COM 调用,纯函数测试碰不到:变异实验里"菜单不过滤"和
-        // "全量掩码退回 7"两个都能活下来。所以在这台真机上按不变量再验一次,
-        // 参照物是绕开本程序全部加工、直接问 COM 得到的计数。
+    // 掩码语义整条进了 COM 调用,纯函数测试碰不到:变异实验里"菜单不过滤"和
+    // "全量掩码退回 7"两个都能活下来。所以在这台真机上按不变量再验一次,
+    // 参照物是绕开本程序全部加工、直接问 COM 得到的计数。
+    static void RealMachineChecks()
+    {
         total++;
         List<Audiolite.Entry> active = Audiolite.Render(Audiolite.Active);
         List<Audiolite.Entry> every = Audiolite.Render(Audiolite.AllStates);
         int raw = Audiolite.CountRaw(0xF);
         bool strays = active.Exists(delegate(Audiolite.Entry e) { return e.State != Audiolite.Active; });
-        bool ok2 = !strays && raw == every.Count && every.Count >= active.Count;
+        bool ok2 = raw >= 0 && !strays && raw == every.Count && every.Count >= active.Count;
         Console.WriteLine((ok2 ? "PASS  " : "FAIL  ") + "菜单只取 active、诊断取全部  全量=" + every.Count
                           + " 直接问COM=" + raw + " active=" + active.Count
+                          + (raw < 0 ? "   枚举失败,本机没有可读的渲染端点" : "")
                           + (strays ? "   active 里混进了别的状态" : ""));
         if (!ok2) failed++;
     }
@@ -268,6 +285,8 @@ static class TestClicks
         Seq("两次独立点击(间隔 400ms)",
             new uint[] { LDOWN, LUP, LDOWN, LUP }, new[] { 5000, 5000, 5400, 5400 }, new[] { N, T, N, T });
 
+        Console.WriteLine("");
+        RealMachineChecks();   // 默认路径也跑,别只在 --leak 里才有
         Console.WriteLine("");
         Console.WriteLine(failed == 0 ? total + "/" + total + " 全部通过" : failed + "/" + total + " 失败");
         return failed == 0 ? 0 : 1;

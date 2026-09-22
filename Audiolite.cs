@@ -48,7 +48,7 @@ internal static class Audiolite
         [PreserveSig] int OnDeviceAdded([MarshalAs(UnmanagedType.LPWStr)] string id);
         [PreserveSig] int OnDeviceRemoved([MarshalAs(UnmanagedType.LPWStr)] string id);
         [PreserveSig] int OnDefaultDeviceChanged(int flow, int role, [MarshalAs(UnmanagedType.LPWStr)] string id);
-        [PreserveSig] int OnPropertyValueChanged([MarshalAs(UnmanagedType.LPWStr)] string id, PropertyKey key);
+        [PreserveSig] int OnPropertyValueChanged([MarshalAs(UnmanagedType.LPWStr)] string id, ref PropertyKey key);
     }
 
     [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -228,6 +228,12 @@ internal static class Audiolite
         if (com != null) Marshal.ReleaseComObject(com);
     }
 
+    // 属性库打不开多半是第三方进程内属性插件抛的,不是端点本身的问题。原先这种设备
+    // 被直接丢掉:既不进菜单也不进 --list,零提示 —— 比多一行裸 ID 难查得多。
+    // 每台只报一次(这条在枚举热路径上,不去重会把 diag.txt 写爆)。
+    // 用 List 不用 HashSet:后者在 System.Core 里,引了就不再是零外部引用。
+    static readonly List<string> nameless = new List<string>();
+
     static List<Entry> All(uint stateMask)
     {
         var list = new List<Entry>();
@@ -257,12 +263,14 @@ internal static class Audiolite
                         arrive = FileTime(ps, ArriveProp, 2);
                         Rel(ps);
                     }
-                    // 属性库打不开多半是第三方进程内属性插件抛的,不是端点本身的问题。
-                    // 原先这里 continue,于是那台设备既不进菜单也不进 --list,零提示
-                    // ——比菜单里多一行裸 ID 难查得多。
-                    if (category.Length == 0 && desc.Length == 0)
+                    // 描述为空就一定得有可辨认的东西:ID 丑,但两台都显示"耳机"就分不出来了。
+                    if (desc.Length == 0)
                     {
-                        Diag("no name for " + id + " (OpenPropertyStore hr=0x" + hrStore.ToString("X8") + "), showing raw ID");
+                        if (!nameless.Contains(id))
+                        {
+                            nameless.Add(id);
+                            Diag("no name for " + id + " (OpenPropertyStore hr=0x" + hrStore.ToString("X8") + "), showing raw ID");
+                        }
                         desc = id;
                     }
                     list.Add(new Entry
@@ -321,51 +329,91 @@ internal static class Audiolite
         return id;
     }
 
-    // 记忆落盘:否则每次重启后左键都只能退回菜单。
-    // exe 旁边优先(绿色程序的本分);放在只读位置时退到 %LOCALAPPDATA%,
-    // 两处都写不了才算真失败——失败必须留日志,静默失效是招牌功能的死法。
-    static IEnumerable<string> StatePaths()
+    // exe 旁边优先(绿色程序的本分);不可写时退到 %LOCALAPPDATA%\Audiolite。
+    // state.txt 与 diag.txt 共用这一份顺序,否则"日志写不进同一处"这种坑会自己长出来。
+    static IEnumerable<string> DataDirs()
     {
-        yield return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "state.txt");
+        yield return AppDomain.CurrentDomain.BaseDirectory;
         string local = Environment.GetEnvironmentVariable("LOCALAPPDATA");
-        if (!string.IsNullOrEmpty(local))
-        {
-            string dir = Path.Combine(local, "Audiolite");
-            try { Directory.CreateDirectory(dir); }
-            catch (Exception) { }
-            yield return Path.Combine(dir, "state.txt");
-        }
+        if (!string.IsNullOrEmpty(local)) yield return Path.Combine(local, "Audiolite");
     }
 
+    static string DiagPath()
+    {
+        if (diagDir != null) return Path.Combine(diagDir, "diag.txt");
+        foreach (string dir in DataDirs())
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                diagDir = dir;
+                return Path.Combine(dir, "diag.txt");
+            }
+            catch (Exception) { }
+        }
+        diagDir = "";
+        return null;
+    }
+
+    static string diagDir;
+
+    // 记账:两处都写不进时不抛出去 —— 记不下来事情,不该把调用方一起带下水。
+    static void Diag(string s)
+    {
+        string p = DiagPath();
+        if (p == null) return;
+        try
+        {
+            File.AppendAllText(p, DateTime.Now.ToString("HH:mm:ss.fff") + "  " + s + Environment.NewLine);
+        }
+        catch (Exception) { }
+    }
+
+    // 记忆落盘:否则每次重启后左键都只能退回菜单。
+    // 读:取两处里最新的那份 —— 只按顺序取第一份,会在 exe 目录转为只读后
+    // 永远读出旧值,新历史静默回退。
+    // 写:两处都写。只写"第一个能写的"会让两份文件从此分道扬镳。
     static void LoadLast()
     {
-        foreach (string p in StatePaths())
+        string newest = null;
+        DateTime stamp = DateTime.MinValue;
+        foreach (string dir in DataDirs())
         {
+            string p = Path.Combine(dir, "state.txt");
             try
             {
                 if (!File.Exists(p)) continue;
                 string s = File.ReadAllText(p).Trim();
-                if (s.Length > 0) { lastId = s; return; }
+                if (s.Length == 0) continue;
+                DateTime t = File.GetLastWriteTimeUtc(p);
+                if (t > stamp) { stamp = t; newest = s; }
             }
             catch (Exception e) { Diag("LoadLast " + p + " -> " + e.GetType().Name + ": " + e.Message); }
         }
+        if (newest != null) lastId = newest;
     }
+
+    // 托盘与 --set 是两个进程,固定名的 state.txt.tmp 会互相顶掉。
+    static readonly string tmpTag = Guid.NewGuid().ToString("N").Substring(0, 8);
 
     static void SaveLast()
     {
         string text = lastId ?? "";
-        foreach (string p in StatePaths())
+        foreach (string dir in DataDirs())
         {
+            string p = Path.Combine(dir, "state.txt");
+            string tmp = p + "." + tmpTag + ".tmp";
             try
             {
-                // 先写临时文件再换上去:直接 WriteAllText 若在写中途掉电,
-                // 留下半截 ID 会让 Last() 永远匹配不上,而又没有任何提示。
-                string tmp = p + ".tmp";
+                Directory.CreateDirectory(dir);
                 File.WriteAllText(tmp, text);
                 if (File.Exists(p)) File.Replace(tmp, p, null); else File.Move(tmp, p);
-                return;
             }
-            catch (Exception e) { Diag("SaveLast " + p + " -> " + e.GetType().Name + ": " + e.Message); }
+            catch (Exception e)
+            {
+                Diag("SaveLast " + p + " -> " + e.GetType().Name + ": " + e.Message);
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+            }
         }
     }
 
@@ -407,6 +455,10 @@ internal static class Audiolite
     {
         if (now == null) return remembered;
         if (seen != null && !SameId(seen, now)) return seen;
+        // 记住的那台就是当前这台:这笔账没有意义,清掉它,左键退回菜单。
+        // 继承来的 state.txt 完全可能是这种形状(v0.5 的写法会留下它),不清掉的话
+        // 左键就永远只是弹菜单,而 diag.txt 里一个字都没有。
+        if (SameId(remembered, now)) return null;
         return remembered;
     }
 
@@ -418,11 +470,20 @@ internal static class Audiolite
 
     internal enum SwitchOutcome { Switched, AlreadyCurrent, Failed }
 
+    // 判定的全部 inputs 就是这四个值,提成纯函数:C3 那条回归("两个 HRESULT 都
+    // 成功、默认设备其实没换")否则只能在真音频硬件上测。
+    internal static SwitchOutcome Decide(string current, string targetId, bool hrOk, string readBack)
+    {
+        if (SameId(current, targetId)) return SwitchOutcome.AlreadyCurrent;
+        if (!hrOk || !SameId(readBack, targetId)) return SwitchOutcome.Failed;
+        return SwitchOutcome.Switched;
+    }
+
     // 执行切换并记账,不碰 UI:命令行和托盘共用这一份,别各写一套账。
     static SwitchOutcome TrySwitch(Entry target, out string current)
     {
         current = DefaultId(eConsole);
-        if (SameId(current, target.Id)) return SwitchOutcome.AlreadyCurrent;
+        if (SameId(current, target.Id)) return SwitchOutcome.AlreadyCurrent;   // 先判再动,一次写入都不发
 
         int hrConsole, hrMultimedia;
         bool hrOk = SetDefault(target, out hrConsole, out hrMultimedia);
@@ -430,16 +491,17 @@ internal static class Audiolite
         // 回读而不是相信返回值:AudioEndpointBuilder 重启、端点在枚举之后消失,
         // 都会让"两个 HRESULT 都成功但默认设备其实没换"成为可能。
         string now = DefaultId(eConsole);
-        if (!hrOk || !SameId(now, target.Id))
-        {
+        SwitchOutcome o = Decide(current, target.Id, hrOk, now);
+        if (o == SwitchOutcome.Failed)
             Diag("switch " + target.Id + " hr=" + Hex(hrConsole) + "/" + Hex(hrMultimedia)
                  + " nowDefault=" + (now ?? "null"));
-            return SwitchOutcome.Failed;
+        else if (o == SwitchOutcome.Switched)
+        {
+            // 记账只在确认成功之后:失败时把 lastId 写成当前设备,就把左键锁死了。
+            if (current != null) { lastId = current; SaveLast(); }
+            seenDefault = target.Id;
         }
-
-        if (current != null) { lastId = current; SaveLast(); }
-        seenDefault = target.Id;
-        return SwitchOutcome.Switched;
+        return o;
     }
 
     static string Hex(int hr) { return "0x" + hr.ToString("X8"); }
@@ -615,7 +677,9 @@ internal static class Audiolite
         public int OnDeviceAdded(string id) { Ping(); return 0; }
         public int OnDeviceRemoved(string id) { Ping(); return 0; }
         public int OnDefaultDeviceChanged(int flow, int role, string id) { if (flow == eRender) Ping(); return 0; }
-        public int OnPropertyValueChanged(string id, PropertyKey key) { return 0; }
+        // IDL 里 key 是 REFPROPERTYKEY(指针),按值声明会收到垃圾数据;这条回调
+        // 现在只是忽略,所以错了无害 —— 但那是"这行不读参数"换来的无害。
+        public int OnPropertyValueChanged(string id, ref PropertyKey key) { return 0; }
         static void Ping() { if (trayHwnd != IntPtr.Zero) PostMessageW(trayHwnd, WM_REFRESH, IntPtr.Zero, IntPtr.Zero); }
     }
 
@@ -629,6 +693,10 @@ internal static class Audiolite
         {
             if (msg == WM_TRAY)
             {
+                // TrackPopupMenuEx 是模态的,但它照样派发 WM_TRAY。菜单开着时再点一次
+                // 会当场改设备,而菜单里那批 targets/勾选项是打开瞬间的快照,松手后
+                // 会按已失效的下标去派发。
+                if (inMenu) return IntPtr.Zero;
                 switch (Classify((uint)(lParam.ToInt64() & 0xFFFF), GetTickCount64()))
                 {
                     case TrayAction.Toggle:
@@ -657,7 +725,12 @@ internal static class Audiolite
     {
         string now = DefaultId(eConsole);
         string next = NextLast(lastId, seenDefault, now);
-        if (!SameId(next, lastId)) { lastId = next; SaveLast(); }
+        if (!string.Equals(next, lastId, StringComparison.Ordinal))
+        {
+            if (next == null) Diag("discarding history: remembered device is the current default (" + now + ")");
+            lastId = next;
+            SaveLast();
+        }
         if (now != null) seenDefault = now;
         UpdateTip();
     }
@@ -754,7 +827,13 @@ internal static class Audiolite
                     // 诊断模式没有标题栏、又是 WS_POPUP,收不到 Alt+F4:让它自己退出,
                     // 否则 --bannertest 会留下一个只能杀进程的常驻窗口。
                     if (bannerSticky) { PostQuitMessage(0); return IntPtr.Zero; }
-                    SetTimer(hWnd, new IntPtr(TIMER_FADE), 40, IntPtr.Zero);
+                    // 定不到时器就立刻藏起来:一条永远不会消失的置顶横幅,比闪一下更糟。
+                    if (SetTimer(hWnd, new IntPtr(TIMER_FADE), 40, IntPtr.Zero) == IntPtr.Zero)
+                    {
+                        Diag("fade SetTimer failed, gle=" + Marshal.GetLastWin32Error() + "; hiding at once");
+                        ShowWindow(hWnd, SW_HIDE);
+                        bannerShown = false;
+                    }
                 }
                 else if (wParam.ToInt32() == TIMER_FADE)
                 {
@@ -801,16 +880,10 @@ internal static class Audiolite
         EndPaint(hWnd, ref ps);
     }
 
-    static void Diag(string s)
-    {
-        // 只记录异常路径:这次 FillRect/DrawTextW 归错 DLL,就是被静默 catch 藏住的。
-        try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diag.txt"), DateTime.Now.ToString("HH:mm:ss.fff") + "  " + s + Environment.NewLine); }
-        catch (Exception) { }
-    }
-
     static void ShowBanner(string text)
     {
-        bannerText = text;
+        // 文本可能是 I8 退化出来的 62 字符裸 ID,不截会顶出一条横跨屏幕的横幅。
+        bannerText = Trim(text, 60);
         if (bannerHwnd == IntPtr.Zero) { Diag("bannerHwnd is NULL - window creation failed"); return; }
 
         POINT p;
@@ -863,7 +936,8 @@ internal static class Audiolite
 
         KillTimer(bannerHwnd, new IntPtr(TIMER_HIDE));
         KillTimer(bannerHwnd, new IntPtr(TIMER_FADE));
-        if (!bannerSticky) SetTimer(bannerHwnd, new IntPtr(TIMER_HIDE), BannerMs, IntPtr.Zero);
+        if (!bannerSticky && SetTimer(bannerHwnd, new IntPtr(TIMER_HIDE), BannerMs, IntPtr.Zero) == IntPtr.Zero)
+            Diag("banner hide SetTimer failed, gle=" + Marshal.GetLastWin32Error() + "; 横幅不会自动消失");
     }
 
     // 托盘图标:槽位尺寸随 DPI 变,16 槽用 16 帧才不发虚;两个帧都拿不到时
@@ -1078,22 +1152,27 @@ internal static class Audiolite
 
         // 显式分派,不再靠"谁都不匹配就落到最后"。原先 --tray 在源码里根本没出现,
         // README 教的自启参数只是碰巧能用;打错字也会静默起一个托盘。
-        if (args.Length == 0 || args[0] == "--tray") return AlreadyRunning() ? 0 : RunTray();
+        if (args.Length == 0) return AlreadyRunning() ? 0 : RunTray();
 
         switch (args[0])
         {
-            case "--list": return List();
-            case "--menu": return Menu();
-            case "--props": return Props();
-            case "--help": Help(); return 0;
+            // 多余的参数一律拒:静默忽略等于让"--list --set x"这种写法看起来成功了。
+            case "--tray":  return args.Length == 1 ? (AlreadyRunning() ? 0 : RunTray()) : Usage("--tray 不接受额外参数");
+            case "--list":  return args.Length == 1 ? List()  : Usage("--list 不接受额外参数");
+            case "--menu":  return args.Length == 1 ? Menu()  : Usage("--menu 不接受额外参数");
+            case "--props": return args.Length == 1 ? Props() : Usage("--props 不接受额外参数");
+            case "--help":  return args.Length == 1 ? (Help0()) : Usage("--help 不接受额外参数");
             case "--version":
+                if (args.Length != 1) return Usage("--version 不接受额外参数");
                 Console.WriteLine(Assembly.GetExecutingAssembly().GetName().Version.ToString());
                 return 0;
-            case "--set": return args.Length == 2 ? Set(args[1]) : Usage(" --set 需要一个 ID");
-            case "--bannertest": return args.Length == 2 ? BannerTest(args[1]) : Usage(" --bannertest 需要一个文本");
+            case "--set": return args.Length == 2 ? Set(args[1]) : Usage("--set 需要一个 ID");
+            case "--bannertest": return args.Length == 2 ? BannerTest(args[1]) : Usage("--bannertest 需要一个文本");
         }
         return Usage("未知参数 " + args[0]);
     }
+
+    static int Help0() { Help(); return 0; }
 
     static int Usage(string why)
     {
