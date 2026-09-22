@@ -8,7 +8,7 @@ Windows 托盘音频输出切换器:点一下图标换一台输出设备。单�
 
 ## 下载
 
-**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。它只往自己旁边写两个文件:`state.txt`(记住上一台设备,左键回切靠它)和出错时才产生的 `diag.txt`;exe 所在目录不可写时,自动退到 `%LOCALAPPDATA%\Audiolite\`,两处内容保持一致。仅支持 Windows 10/11。
+**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。它只写两个文件:`state.txt`(记住上一台设备,左键回切靠它)和出错时才产生的 `diag.txt`。exe 所在目录不可写时自动退到 `%LOCALAPPDATA%\Audiolite\` —— `state.txt` 两处都写、读取取较新的一份(永不分歧),`diag.txt` 只写第一个写得动的地方。仅支持 Windows 10/11。
 
 **首次运行会被 SmartScreen 拦一下。** 本程序未做代码签名,Windows 大概率弹出"已保护你的电脑 / 未知发布者",点 **更多信息 → 仍要运行** 即可。这是所有未签名个人工具的通例,与程序本身是否有恶意无关。
 
