@@ -198,6 +198,32 @@ static class TestClicks
 
     // 实验:反复枚举 -> 看句柄是否累积 -> 强制 GC -> 看句柄是否回落。
     // 回落 = 句柄是 COM RCW 等终结器造成的,假设成立。
+    // 上一批的教训:状态文件与横幅几何全是 private,57 条断言一条都碰不到,
+    // 于是"改完没验证"就混过去了。规则提成纯函数后逐条钉住。
+    static void StateAndGeometry()
+    {
+        Case("空文件 = 已清空", Audiolite.StateValue("") ?? "null", "null");
+        Case("只有空白 = 已清空", Audiolite.StateValue("   ") ?? "null", "null");
+        Case("none = 已清空", Audiolite.StateValue("none") ?? "null", "null");
+        Case("NONE 也算已清空(大小写)", Audiolite.StateValue("NONE") ?? "null", "null");
+        Case("带换行的 ID 要裁掉", Audiolite.StateValue("{0.0.0.1234}\r\n"), "{0.0.0.1234}");
+        Case("null 内容 = 已清空", Audiolite.StateValue(null) ?? "null", "null");
+
+        DateTime now = new DateTime(2026, 9, 22, 12, 0, 0, DateTimeKind.Utc);
+        DateTime old5 = now.AddMinutes(-5), fresh = now.AddSeconds(-2);
+        Case("旧版固定名 tmp 可清", Audiolite.Sweepable("state.txt.tmp", old5, now) ? "y" : "n", "y");
+        Case("刚写的固定名 tmp 不能清", Audiolite.Sweepable("state.txt.tmp", fresh, now) ? "y" : "n", "n");
+        Case("别人的在途 tmp 不能清", Audiolite.Sweepable("state.txt.beef1234.tmp", fresh, now) ? "y" : "n", "n");
+        Case("崩溃留下的 tmp 可清", Audiolite.Sweepable("state.txt.beef1234.tmp", old5, now) ? "y" : "n", "y");
+        Case("state.txt 本身永不清", Audiolite.Sweepable("state.txt", old5, now) ? "y" : "n", "n");
+        Case("无关文件不清", Audiolite.Sweepable("state.txt.bak", old5, now) ? "y" : "n", "n");
+
+        Case("100px 小工作区不弹(事故那档)", Audiolite.BannerFits(100, 60, 27) ? "fits" : "skip", "skip");
+        Case("2560 工作区正常弹", Audiolite.BannerFits(2560, 1528, 27) ? "fits" : "skip", "fits");
+        Case("1024 工作区正常弹", Audiolite.BannerFits(1024, 728, 18) ? "fits" : "skip", "fits");
+        Case("高度不够也不弹", Audiolite.BannerFits(2560, 40, 27) ? "fits" : "skip", "skip");
+    }
+
     const int LeakLimit = 12;
 
     static void LeakProbe()
@@ -256,6 +282,7 @@ static class TestClicks
 
         Names();
         History();
+        StateAndGeometry();
         FadeSequenceMustOnlyShrink();
         // 真机日志:15:45:00.172 按下 / 15:45:00.172 抬起 —— 同一毫秒
         Seq("左键 按下+抬起(同一毫秒)",

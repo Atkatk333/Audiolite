@@ -8,8 +8,8 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyProduct("Audiolite")]
 [assembly: AssemblyCompany("Atkatk333")]
 [assembly: AssemblyCopyright("Copyright \u00A9 2026 Atkatk333")]
-[assembly: AssemblyVersion("0.5.0.0")]
-[assembly: AssemblyFileVersion("0.5.0.0")]
+[assembly: AssemblyVersion("0.5.1.0")]
+[assembly: AssemblyFileVersion("0.5.1.0")]
 
 // 0 依赖托盘版:只用 user32 / gdi32 / shell32,不引用 WinForms 与 System.Drawing,
 // 因此 gdiplus 全程不加载。托盘图标取系统音量程序里的图标。
@@ -253,7 +253,8 @@ internal static class Audiolite
                 if (coll.Item(i, out dev) != 0) continue;
                 try
                 {
-                    string id; dev.GetId(out id);
+                    string id;
+                    if (dev.GetId(out id) != 0) continue;
                     uint state; dev.GetState(out state);
                     string category = "", desc = "";
                     DateTime install = DateTime.MaxValue, arrive = DateTime.MaxValue;
@@ -377,6 +378,17 @@ internal static class Audiolite
     // 清掉的记忆会被另一处那份旧的非空值在 mtime 竞赛里顶回来,下次启动无声复活。
     const string NoLast = "none";
 
+    // 空文件与 "none" 都表示"确实没有上一台"。
+    // 空串不是"没有内容可参考":旧版清历史时写的就是空串,跳过它就等于让另一处
+    // 那份旧 ID 在 mtime 竞赛里必赢 —— 被清掉的记忆复活,而且此后永不写盘。
+    internal static string StateValue(string raw)
+    {
+        string s = (raw ?? "").Trim();
+        if (s.Length == 0) return null;
+        if (string.Equals(s, NoLast, StringComparison.OrdinalIgnoreCase)) return null;
+        return s;
+    }
+
     static void LoadLast()
     {
         string newest = null;
@@ -388,17 +400,46 @@ internal static class Audiolite
             try
             {
                 if (!File.Exists(p)) continue;
-                string s = File.ReadAllText(p).Trim();
-                if (s.Length == 0) continue;
                 DateTime t = File.GetLastWriteTimeUtc(p);
                 if (t <= stamp) continue;
                 stamp = t;
-                newest = s == NoLast ? null : s;
+                newest = StateValue(File.ReadAllText(p));
                 found = true;
             }
             catch (Exception e) { Diag("LoadLast " + p + " -> " + e.GetType().Name + ": " + e.Message); }
         }
         if (found) lastId = newest;
+    }
+
+    // 随机 tmp 名换来"不互相顶掉",代价是崩溃留下的文件没人收;每次成功写完后扫掉。
+    // 两条判据都必须有:刚写的 tmp 属于另一个还在跑的进程(实测会撞),
+    // 而旧版用的固定名 state.txt.tmp 不匹配 "state.txt.*.tmp" 这个模式。
+    const long TmpAgeLimitSec = 60;
+
+    internal static bool Sweepable(string name, DateTime writtenUtc, DateTime nowUtc)
+    {
+        if (name == "state.txt.tmp") return nowUtc - writtenUtc > TimeSpan.FromSeconds(TmpAgeLimitSec);
+        return name.StartsWith("state.txt.", StringComparison.OrdinalIgnoreCase)
+               && name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)
+               && nowUtc - writtenUtc > TimeSpan.FromSeconds(TmpAgeLimitSec);
+    }
+
+    static void SweepTmp(string dir)
+    {
+        try
+        {
+            DateTime now = DateTime.UtcNow;
+            foreach (string f in Directory.GetFiles(dir, "state.txt*"))
+            {
+                string name = Path.GetFileName(f);
+                try
+                {
+                    if (Sweepable(name, File.GetLastWriteTimeUtc(f), now)) File.Delete(f);
+                }
+                catch (Exception) { }
+            }
+        }
+        catch (Exception) { }
     }
 
     // 托盘与 --set 是两个进程,固定名的 state.txt.tmp 会互相顶掉。
@@ -416,28 +457,14 @@ internal static class Audiolite
                 Directory.CreateDirectory(dir);
                 File.WriteAllText(tmp, text);
                 if (File.Exists(p)) File.Replace(tmp, p, null); else File.Move(tmp, p);
-                SweepTmp(dir, tmp);
             }
             catch (Exception e)
             {
                 Diag("SaveLast " + p + " -> " + e.GetType().Name + ": " + e.Message);
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
             }
+            SweepTmp(dir);
         }
-    }
-
-    // 随机 tmp 名换来"不互相顶掉",代价是崩溃留下的文件没人收;每次成功写完顺手扫掉。
-    static void SweepTmp(string dir, string mine)
-    {
-        try
-        {
-            foreach (string f in Directory.GetFiles(dir, "state.txt.*.tmp"))
-            {
-                if (string.Equals(f, mine, StringComparison.OrdinalIgnoreCase)) continue;
-                try { File.Delete(f); } catch (Exception) { }
-            }
-        }
-        catch (Exception) { }
     }
 
     internal enum TrayAction { None, Toggle, Menu }
@@ -894,16 +921,17 @@ internal static class Audiolite
         SetTextColor(dc, 0xFFFFFF);
 
         IntPtr font = SelectObject(dc, BannerFont());
-        RECT probe = new RECT();
-        DrawTextW(dc, bannerText, -1, ref probe, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-        // 夹取过就一定"装不下",那是设计而非故障;只在没夹的时候报裁切。
-        if (!bannerClamped && (probe.right - probe.left > rc.right || probe.bottom - probe.top > rc.bottom))
-            Diag("BANNER CLIPPED text=" + (probe.right - probe.left) + "x" + (probe.bottom - probe.top)
-                 + " client=" + rc.right + "x" + rc.bottom + " \"" + bannerText + "\"");
         RECT text = new RECT { left = 0, top = 0, right = rc.right, bottom = rc.bottom };
         DrawTextW(dc, bannerText, -1, ref text, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, font);
         EndPaint(hWnd, ref ps);
+    }
+
+    // 工作区小到放不下一条最小可用的横幅时,宁可不弹也别弹在屏幕外。
+    // 下限要留出一个字的宽度:150% 下 pad=27,再叠一个 8 字宽的余量。
+    internal static bool BannerFits(int workW, int workH, int pad)
+    {
+        return workW > pad * 2 + 8 * 16 && workH > pad * 2 + 16;
     }
 
     // 藏掉横幅并清状态。定不到定时器时的兜底 —— 一条永不消失的置顶不透明块,
@@ -948,17 +976,25 @@ internal static class Audiolite
         int pad = (int)(18 * dpiScale);
         int needW = (need.right - need.left) + pad * 2;
         int h = (need.bottom - need.top) + pad * 2;
-        // 夹取按像素,不按字符数:60 个汉字在 150% 下就是 1700 多 px,字符界根本兜不住。
-        // 超过工作区 60% 就夹,绘制侧用 DT_END_ELLIPSIS 收尾 —— 截断由同一个 API 负责,
-        // 不会出现"按像素夹了、按字符画"的错位。
-        int maxW = (int)((work.right - work.left) * 0.6);
-        bannerClamped = maxW > pad * 4 && needW > maxW;
+        int workW = work.right - work.left, workH = work.bottom - work.top;
+        // 真放不下就不弹,别弹一个看不见的:坐标为负的横幅和没弹是同一件事,
+        // 但只有这一条会被日志记录下来。
+        if (!BannerFits(workW, workH, pad))
+        {
+            Diag("work area too small " + workW + "x" + workH + "; banner skipped, text=\"" + text + "\"");
+            return;
+        }
+        // 夹取按像素,不按字符数:60 个汉字在 150% 下就是 1700 多 px,字符界兜不住。
+        // 这里不再叠一层"防呆阈值"—— 实测那层会在小工作区上反过来把夹取关掉
+        // (100px 宽 → maxW=60 ≤ pad*4 → clamped=False → 1614px 窗口配 x=-1550,
+        // 整块跑到屏幕外)。真放不下已由上一行提前挡掉。
+        int maxW = workW * 3 / 5;
+        bannerClamped = needW > maxW;
         int w = bannerClamped ? maxW : needW;
         int x = work.right - w - (int)(24 * dpiScale);
         int y = work.bottom - h - (int)(24 * dpiScale);
-        lastBannerGeom = "workW=" + (work.right - work.left) + " workH=" + (work.bottom - work.top)
-                         + " need=" + needW + " max=" + maxW + " clamped=" + bannerClamped
-                         + " at=" + x + "," + y;
+        lastBannerGeom = "work=" + workW + "x" + workH + " need=" + needW + " max=" + maxW
+                         + " clamped=" + bannerClamped + " at=" + x + "," + y;
 
         // 残影根因:在窗口可见的状态下改尺寸,改完到同步重绘之间,DWM 作为独立
         // 合成线程可能把"新几何 + 旧像素"这一帧贴出来。所以尺寸没变就完全不动
@@ -978,6 +1014,16 @@ internal static class Audiolite
         ShowWindow(bannerHwnd, SW_SHOWNOACTIVATE);
         // 同步重绘:异步 InvalidateRect 要等消息队列空闲,切完会有延迟感。
         RedrawWindow(bannerHwnd, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+
+        // 自检要检查"可能与真实情况矛盾的东西"。原先那条拿同一次测量算出的宽度去比
+        // 同一个宽度,按构造永不成立 —— 把整段夹取删掉也不会有任何反应,等于假自检。
+        // 换成查最终坐标:这一条真的抓到过一次把横幅算到屏幕外的事故。
+        RECT fr;
+        if (GetWindowRect(bannerHwnd, out fr) &&
+            (fr.left < work.left || fr.top < work.top || fr.right > work.right || fr.bottom > work.bottom))
+            Diag("BANNER OFFSCREEN rect=" + fr.left + "," + fr.top + "," + fr.right + "," + fr.bottom
+                 + " work=" + work.left + "," + work.top + "," + work.right + "," + work.bottom
+                 + " " + lastBannerGeom);
 
         KillTimer(bannerHwnd, new IntPtr(TIMER_HIDE));
         KillTimer(bannerHwnd, new IntPtr(TIMER_FADE));
@@ -1052,6 +1098,13 @@ internal static class Audiolite
         uint dpi = GetDpiForSystem();
         dpiScale = dpi == 0 ? 1f : dpi / 96f;
         CreateBannerWindow(RegisterClasses());
+        if (bannerHwnd == IntPtr.Zero)
+        {
+            // SetTimer(NULL,...) 会退化成线程定时器,WM_TIMER 不派发到窗口 ——
+            // 那条 5 秒自杀的出口根本不会触发,诊断模式反而留下一个挂死的进程。
+            Diag("bannertest: banner window not created");
+            return 3;
+        }
         bannerSticky = true;
         ShowBanner(text);
         if (SetTimer(bannerHwnd, new IntPtr(TIMER_HIDE), 5000, IntPtr.Zero) == IntPtr.Zero)
