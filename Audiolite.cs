@@ -245,7 +245,8 @@ internal static class Audiolite
                     string category = "", desc = "";
                     DateTime install = DateTime.MaxValue, arrive = DateTime.MaxValue;
                     IPropertyStore ps;
-                    if (dev.OpenPropertyStore(0, out ps) == 0)
+                    int hrStore = dev.OpenPropertyStore(0, out ps);
+                    if (hrStore == 0)
                     {
                         category = Str(ps, DevProp, 2);
                         desc = StripWinPrefix(Str(ps, DescProp, 6));
@@ -253,7 +254,14 @@ internal static class Audiolite
                         arrive = FileTime(ps, ArriveProp, 2);
                         Rel(ps);
                     }
-                    if (category.Length == 0 && desc.Length == 0) continue;
+                    // 属性库打不开多半是第三方进程内属性插件抛的,不是端点本身的问题。
+                    // 原先这里 continue,于是那台设备既不进菜单也不进 --list,零提示
+                    // ——比菜单里多一行裸 ID 难查得多。
+                    if (category.Length == 0 && desc.Length == 0)
+                    {
+                        Diag("no name for " + id + " (OpenPropertyStore hr=0x" + hrStore.ToString("X8") + "), showing raw ID");
+                        desc = id;
+                    }
                     list.Add(new Entry
                     {
                         Id = id,
@@ -468,6 +476,7 @@ internal static class Audiolite
 
     const int SW_SHOWNOACTIVATE = 4, SW_HIDE = 0;
     const int DT_CENTER = 0x0001, DT_VCENTER = 0x0004, DT_SINGLELINE = 0x0020;
+    const int DT_LEFT = 0x0000, DT_CALCRECT = 0x0400;
     const int TRANSPARENT = 1;
     const uint LWA_ALPHA = 2;
     const uint RDW_INVALIDATE = 0x1, RDW_UPDATENOW = 0x100, RDW_ALLCHILDREN = 0x80;
@@ -481,7 +490,6 @@ internal static class Audiolite
     const uint BANNER_BG = 0x201C1C;   // COLORREF BBGGRR = RGB(28,28,32)
 
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; }
-    [StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx, cy; }
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int left, top, right, bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -565,7 +573,6 @@ internal static class Audiolite
     [DllImport("user32.dll")] static extern int FillRect(IntPtr dc, ref RECT r, IntPtr brush);
     [DllImport("gdi32.dll")] static extern int SetBkMode(IntPtr dc, int mode);
     [DllImport("gdi32.dll")] static extern uint SetTextColor(IntPtr dc, uint color);
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern bool GetTextExtentPoint32W(IntPtr dc, string text, int len, out SIZE size);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int DrawTextW(IntPtr dc, string text, int len, ref RECT r, uint flags);
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateFontW(int height, int width, int esc, int orient, int weight, uint italic, uint underline, uint strike, uint charset, uint outPrecision, uint clipPrecision, uint quality, uint pitch, string face);
     [DllImport("user32.dll")] static extern IntPtr BeginPaint(IntPtr h, out PAINTSTRUCT ps);
@@ -768,6 +775,11 @@ internal static class Audiolite
         SetTextColor(dc, 0xFFFFFF);
 
         IntPtr font = SelectObject(dc, BannerFont());
+        RECT probe = new RECT();
+        DrawTextW(dc, bannerText, -1, ref probe, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+        if (probe.right - probe.left > rc.right || probe.bottom - probe.top > rc.bottom)
+            Diag("BANNER CLIPPED text=" + (probe.right - probe.left) + "x" + (probe.bottom - probe.top)
+                 + " client=" + rc.right + "x" + rc.bottom + " \"" + bannerText + "\"");
         RECT text = new RECT { left = 0, top = 0, right = rc.right, bottom = rc.bottom };
         DrawTextW(dc, bannerText, -1, ref text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(dc, font);
@@ -794,16 +806,18 @@ internal static class Audiolite
         GetMonitorInfoW(mon, ref mi);
         RECT work = mi.rcWork;
 
+        // 量宽度用 DT_CALCRECT,不用 GetTextExtentPoint32W:前者量的正是下面
+        // DrawTextW 要走的那套排版,不可能出现"量的是一套、画的另一套"。
         IntPtr dc = GetDC(bannerHwnd);
         IntPtr oldFont = SelectObject(dc, BannerFont());
-        SIZE sz;
-        GetTextExtentPoint32W(dc, text, text.Length, out sz);
+        RECT need = new RECT();
+        DrawTextW(dc, text, -1, ref need, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
         SelectObject(dc, oldFont);
         ReleaseDC(bannerHwnd, dc);
 
         int pad = (int)(18 * dpiScale);
-        int w = sz.cx + pad * 2;
-        int h = sz.cy + pad * 2;
+        int w = (need.right - need.left) + pad * 2;
+        int h = (need.bottom - need.top) + pad * 2;
         int x = work.right - w - (int)(24 * dpiScale);
         int y = work.bottom - h - (int)(24 * dpiScale);
 
