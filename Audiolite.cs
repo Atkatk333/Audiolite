@@ -1,7 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
+
+[assembly: AssemblyTitle("Audiolite")]
+[assembly: AssemblyProduct("Audiolite")]
+[assembly: AssemblyVersion("0.5.0.0")]
+[assembly: AssemblyFileVersion("0.5.0.0")]
 
 // 0 依赖托盘版:只用 user32 / gdi32 / shell32,不引用 WinForms 与 System.Drawing,
 // 因此 gdiplus / DWrite 全程不加载。图标是构建期生成的 speaker.ico。
@@ -822,6 +828,11 @@ internal static class Audiolite
         en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(CMMDeviceEnumerator));
 
         if (args.Length > 0 && args[0] == "--list") return List();
+        if (args.Length > 0 && args[0] == "--version")
+        {
+            Console.WriteLine(Assembly.GetExecutingAssembly().GetName().Version.ToString());
+            return 0;
+        }
         if (args.Length > 0 && args[0] == "--props") return Props();
         if (args.Length > 0 && args[0] == "--menu") return Menu();
         if (args.Length == 2 && args[0] == "--bannertest") return BannerTest(args[1]);
