@@ -62,7 +62,14 @@ static class TestClicks
 
     static Audiolite.Entry E(string id, string cat, string desc, string install)
     {
-        return new Audiolite.Entry { Id = id, Category = cat, Desc = desc, Install = DateTime.Parse(install) };
+        // Arrive 显式给 MaxValue = "这个端点没有接入时间属性"。真机上多数端点
+        // 就是这个形状(本机 16 个端点里只有 4 个带该属性),不写清就会把
+        // "按安装时间回退"这条路径测成别的。
+        return new Audiolite.Entry
+        {
+            Id = id, Category = cat, Desc = desc,
+            Install = DateTime.Parse(install), Arrive = DateTime.MaxValue
+        };
     }
 
     static Audiolite.Entry EA(string id, string cat, string desc, string install, string arrive)
@@ -112,7 +119,8 @@ static class TestClicks
              "耳机 2 (蓝牙耳机B)");
 
         // 排序键必须是"接入时间",不是安装时间:
-        // 后装的那台如果先连上,它就该排在前面。
+        // 后装的那台如果先连上,它就该排在前面。编号也必须真的走一遍
+        // AssignRanks,只比 ByOrder 的先后测不到编号。
         var byArrive = new List<Audiolite.Entry>
         {
             EA("{x}", "耳机", "后装但先连", "2026-01-01", "2026-09-21 09:00"),
@@ -120,7 +128,9 @@ static class TestClicks
         };
         byArrive.Sort(Audiolite.ByOrder);
         Case("接入时间优先于安装时间", byArrive[0].Desc, "后装但先连");
-        Case("接入时间决定编号", Audiolite.Label(byArrive[1].Category, byArrive[1].Desc, 2, 2), "耳机 2 (先装但后连)");
+        Audiolite.AssignRanks(byArrive);
+        Case("接入时间决定编号", Audiolite.Label(byArrive[1].Category, byArrive[1].Desc, byArrive[1].Rank, byArrive[1].Total),
+             "耳机 2 (先装但后连)");
 
         // 拿不到接入时间时(属性缺失 -> MaxValue 哨兵)必须退回安装时间,
         // 否则顺序会变得不确定。
@@ -129,10 +139,22 @@ static class TestClicks
             E("{p}", "耳机", "后装的那台", "2024-01-01"),
             E("{q}", "耳机", "先装的那台", "2020-01-01"),
         };
-        fallback[0].Arrive = DateTime.MaxValue;
-        fallback[1].Arrive = DateTime.MaxValue;
         fallback.Sort(Audiolite.ByOrder);
         Case("缺失接入时间时退回安装时间", fallback[0].Desc, "先装的那台");
+
+        Case("空描述不渲染成空括号", Audiolite.Label("耳机", "", 2, 2), "耳机");
+        Case("菜单文本里 & 翻倍", Audiolite.MenuEsc("B&O Beoplay"), "B&&O Beoplay");
+        Case("状态 1", Audiolite.StateName(1), "active");
+        Case("状态 2 是 disabled 不是 unplugged", Audiolite.StateName(2), "disabled");
+        Case("状态 4", Audiolite.StateName(4), "not-present");
+        Case("状态 8 才是 unplugged", Audiolite.StateName(8), "unplugged");
+        Case("FILETIME 为 0 视作缺失", Audiolite.SafeFileTime(0).ToString("o"), DateTime.MaxValue.ToString("o"));
+        Case("FILETIME 负值视作缺失", Audiolite.SafeFileTime(-1).ToString("o"), DateTime.MaxValue.ToString("o"));
+        Case("FILETIME 越界视作缺失", Audiolite.SafeFileTime(DateTime.MaxValue.ToFileTime() + 1).ToString("o"),
+             DateTime.MaxValue.ToString("o"));
+        Case("FILETIME 正常值原样转换",
+             Audiolite.SafeFileTime(new DateTime(2026, 9, 21, 11, 47, 0).ToFileTime()).ToString("yyyy-MM-dd HH:mm"),
+             "2026-09-21 11:47");
     }
 
     // 实验:反复枚举 -> 看句柄是否累积 -> 强制 GC -> 看句柄是否回落。

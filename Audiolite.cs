@@ -6,6 +6,8 @@ using System.Runtime.InteropServices;
 
 [assembly: AssemblyTitle("Audiolite")]
 [assembly: AssemblyProduct("Audiolite")]
+[assembly: AssemblyCompany("Atkatk333")]
+[assembly: AssemblyCopyright("Copyright \u00A9 2026 Atkatk333")]
 [assembly: AssemblyVersion("0.5.0.0")]
 [assembly: AssemblyFileVersion("0.5.0.0")]
 
@@ -17,8 +19,10 @@ internal static class Audiolite
 
     const int eRender = 0;
     const int eConsole = 0, eMultimedia = 1;
-    const uint Active = 1, Unplugged = 2;
-    const uint AllStates = 7;
+    // 取值是 mmdeviceapi.h 的 EDEVICE_STATE_TYPE:2 是 DISABLED、8 才是 UNPLUGGED,
+    // 全量掩码是 0xF。
+    const uint Active = 1, Disabled = 2, NotPresent = 4, Unplugged = 8;
+    const uint AllStates = 0xF;
 
     [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
     class CMMDeviceEnumerator { }
@@ -143,8 +147,16 @@ internal static class Audiolite
         PropertyKey key = new PropertyKey { fmtid = fmtid, pid = pid };
         PropVariant pv;
         if (store.GetValue(ref key, out pv) != 0) return DateTime.MaxValue;
-        try { return pv.vt == 64 ? DateTime.FromFileTime(pv.p.ToInt64()) : DateTime.MaxValue; }
+        try { return pv.vt == 64 ? SafeFileTime(pv.p.ToInt64()) : DateTime.MaxValue; }
         finally { PropVariantClear(ref pv); }
+    }
+
+    // 属性存在但值为 0 时 FILETIME 是 1601-01-01,那是个合法排序键,会把这台机器
+    // 顶到组内第一并且不编号;越界值则让 FromFileTime 直接抛异常。
+    internal static DateTime SafeFileTime(long ticks)
+    {
+        if (ticks <= 0 || ticks > DateTime.MaxValue.ToFileTime()) return DateTime.MaxValue;
+        return DateTime.FromFileTime(ticks);
     }
 
     // Windows 自带的 "2-" 前缀只反映设备接口描述冲突,与"同类别有几台"无关
@@ -163,6 +175,7 @@ internal static class Audiolite
     internal static string Label(string category, string desc, int rank, int total)
     {
         if (category.Length == 0) return desc;
+        if (desc.Length == 0) return category;
         if (total < 2 || rank <= 1) return category + " (" + desc + ")";
         return category + " " + rank + " (" + desc + ")";
     }
@@ -208,38 +221,44 @@ internal static class Audiolite
         var list = new List<Entry>();
         IMMDeviceCollection coll;
         if (en.EnumAudioEndpoints(eRender, AllStates, out coll) != 0) return list;
-        uint n;
-        coll.GetCount(out n);
-        for (uint i = 0; i < n; i++)
+        try
         {
-            IMMDevice dev;
-            if (coll.Item(i, out dev) != 0) continue;
-            string id; dev.GetId(out id);
-            uint state; dev.GetState(out state);
-            string category = "", desc = "";
-            DateTime install = DateTime.MaxValue, arrive = DateTime.MaxValue;
-            IPropertyStore ps;
-            if (dev.OpenPropertyStore(0, out ps) == 0)
+            uint n;
+            coll.GetCount(out n);
+            for (uint i = 0; i < n; i++)
             {
-                category = Str(ps, DevProp, 2);
-                desc = StripWinPrefix(Str(ps, DescProp, 6));
-                install = FileTime(ps, InstallProp, 100);
-                arrive = FileTime(ps, ArriveProp, 2);
-                Rel(ps);
+                IMMDevice dev;
+                if (coll.Item(i, out dev) != 0) continue;
+                try
+                {
+                    string id; dev.GetId(out id);
+                    uint state; dev.GetState(out state);
+                    string category = "", desc = "";
+                    DateTime install = DateTime.MaxValue, arrive = DateTime.MaxValue;
+                    IPropertyStore ps;
+                    if (dev.OpenPropertyStore(0, out ps) == 0)
+                    {
+                        category = Str(ps, DevProp, 2);
+                        desc = StripWinPrefix(Str(ps, DescProp, 6));
+                        install = FileTime(ps, InstallProp, 100);
+                        arrive = FileTime(ps, ArriveProp, 2);
+                        Rel(ps);
+                    }
+                    if (category.Length == 0 && desc.Length == 0) continue;
+                    list.Add(new Entry
+                    {
+                        Id = id,
+                        State = state,
+                        Category = category,
+                        Desc = desc,
+                        Install = install,
+                        Arrive = arrive
+                    });
+                }
+                finally { Rel(dev); }
             }
-            Rel(dev);
-            if (category.Length == 0 && desc.Length == 0) continue;
-            list.Add(new Entry
-            {
-                Id = id,
-                State = state,
-                Category = category,
-                Desc = desc,
-                Install = install,
-                Arrive = arrive
-            });
         }
-        Rel(coll);
+        finally { Rel(coll); }
         return list;
     }
 
@@ -516,6 +535,10 @@ internal static class Audiolite
         Shell_NotifyIconW(NIM_MODIFY, ref nid);
     }
 
+    // 菜单文本里单个 & 是助记符(B&O 会显示成 BO 并吃掉一次 Alt),要翻倍。
+    // 必须在 Trim 之后做,否则截断可能把成对的 && 劈开。
+    internal static string MenuEsc(string s) { return s.Replace("&", "&&"); }
+
     static void ShowMenu()
     {
         List<Entry> targets = Render(Active);
@@ -523,7 +546,7 @@ internal static class Audiolite
         IntPtr menu = CreatePopupMenu();
         for (int i = 0; i < targets.Count; i++)
         {
-            AppendMenuW(menu, MF_STRING, new IntPtr(i + 1), Trim(targets[i].Name, 60));
+            AppendMenuW(menu, MF_STRING, new IntPtr(i + 1), MenuEsc(Trim(targets[i].Name, 60)));
             if (string.Equals(targets[i].Id, current, StringComparison.OrdinalIgnoreCase))
                 CheckMenuItem(menu, (uint)(i + 1), MF_CHECKED);
         }
@@ -796,19 +819,24 @@ internal static class Audiolite
         return 0;
     }
 
+    internal static string StateName(uint state)
+    {
+        if (state == Active) return "active";
+        if (state == Disabled) return "disabled";
+        if (state == NotPresent) return "not-present";
+        if (state == Unplugged) return "unplugged";
+        return "0x" + state.ToString("X");
+    }
+
     static int List()
     {
         string def = DefaultId(eConsole);
         foreach (Entry e in Render(AllStates))
-        {
-            string st = e.State == Active ? "active" : (e.State == Unplugged ? "unplugged" : "not-present");
-            Console.WriteLine("{0}\t{1}\t{2}\t{3}", e.Id == def ? "*" : " ", st, e.Id, e.Name);
-        }
+            Console.WriteLine("{0}\t{1}\t{2}\t{3}", e.Id == def ? "*" : " ", StateName(e.State), e.Id, e.Name);
         return 0;
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateMutexW(IntPtr attr, bool owner, string name);
-    [DllImport("kernel32.dll")] static extern uint GetLastError();
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateMutexW(IntPtr attr, bool owner, string name);
     const uint ERROR_ALREADY_EXISTS = 183;
 
     static IntPtr mutex;
@@ -819,7 +847,9 @@ internal static class Audiolite
     static bool AlreadyRunning()
     {
         mutex = CreateMutexW(IntPtr.Zero, false, "Local\\AudioliteTray");
-        return GetLastError() == ERROR_ALREADY_EXISTS;
+        // 裸 GetLastError() P/Invoke 不保证还是这次调用留下的错误码,必须走
+        // SetLastError=true + Marshal.GetLastWin32Error() 这条约定。
+        return Marshal.GetLastWin32Error() == ERROR_ALREADY_EXISTS;
     }
 
     static int Main(string[] args)
