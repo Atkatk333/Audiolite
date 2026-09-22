@@ -4,11 +4,11 @@
 ![Downloads](https://img.shields.io/github/downloads/Atkatk333/Audiolite/total)
 ![License](https://img.shields.io/github/license/Atkatk333/Audiolite)
 
-Windows 托盘音频输出切换器:点一下图标换一台输出设备。单文件 26 KB,无常驻依赖,私有内存约 10 MB。
+Windows 托盘音频输出切换器:点一下图标换一台输出设备。单个 exe 文件,无常驻依赖,私有内存十几 MB。
 
 ## 下载
 
-**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。只会在 exe 旁边写两个自己的文件:`state.txt`(记住上一台设备,左键回切靠它)和出错时才产生的 `diag.txt`。仅支持 Windows 10/11。
+**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。它只往自己旁边写两个文件:`state.txt`(记住上一台设备,左键回切靠它)和出错时才产生的 `diag.txt`;exe 所在目录不可写时,自动退到 `%LOCALAPPDATA%\Audiolite\`,两处内容保持一致。仅支持 Windows 10/11。
 
 **首次运行会被 SmartScreen 拦一下。** 本程序未做代码签名,Windows 大概率弹出"已保护你的电脑 / 未知发布者",点 **更多信息 → 仍要运行** 即可。这是所有未签名个人工具的通例,与程序本身是否有恶意无关。
 
@@ -50,7 +50,7 @@ Windows 的消歧前缀塞在括号里(`耳机 (2- 蓝牙耳机A)`),且只在设
 
 ## 为什么自研
 
-只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的"切换输出设备"这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算:
+只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的"切换输出设备"这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算。**Audiolite 两列测的都是 0.5.0.0 那个二进制,发新版本后须重测再引用**:
 
 | | SoundSwitch 7.2.1 | Audiolite 刚启动 | Audiolite 连跑 6 小时 |
 |---|---|---|---|
@@ -77,18 +77,18 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
   -nologo -noconfig -target:winexe -out:bin\Audiolite.exe Audiolite.cs
 ```
 
-目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `WinForms` 全程不加载——这是内存能压到 10 MB 的原因。
+目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `WinForms` 全程不加载——这是刚启动只有 10 MB 量级的原因。
 
-测试(46 条,覆盖点击事件判定、命名编号、状态位映射、切换记账、淡出序列;条数以 `test.exe` 输出末尾为准):
+测试(55 条,覆盖点击事件判定、命名编号、状态位映射、切换判定与记账、淡出序列;条数以 `test.exe` 输出末尾为准):
 
 ```powershell
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 & $csc -nologo -noconfig -r:System.dll -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
-.\test.exe
-.\test.exe --leak     # 真机自检:180 次枚举后句柄增长须在 +12 内;且 active 视图不许混进别的状态、全量视图须与直接问 COM 的计数一致
+.\test.exe            # 含真机不变量:active 视图不许混进别的状态、全量视图须与直接问 COM 的计数一致
+.\test.exe --leak     # 再多跑一项:180 次枚举后句柄增长须在 +12 以内
 ```
 
-编号与掩码语义这两处过不了纯函数测试(前者要求喂真到达时间,后者整个在 COM 调用里),所以用变异测试卡住:把排序键换成安装时间、把菜单的过滤去掉、把全量掩码从 0xF 退回 7,现在都会让测试失败。
+有些规则纯函数测不到(编号要喂真到达时间、掩码整个在 COM 调用里、失败判定要模拟回读不符),所以用变异测试卡:把排序键换成安装时间、把菜单的过滤去掉、把全量掩码从 0xF 退回 7、去掉切换后的回读比对、去掉"上一台就是当前设备就清空记忆"——这五条现在都会让测试失败。唯一还活着的已知变异是"切换成功后写 `lastId`"那行赋值,要覆盖它必须真改一次声音输出。
 
 ## 已知边界
 
@@ -97,7 +97,7 @@ $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 - **只切"控制台"和"多媒体"两个角色,不切"通信"。** 这和 Windows 自带音量浮窗的行为一致。显式按通信角色取设备的程序(Teams、YY 一类)输出不会跟着切。
 - **编号会随连接情况变化。** 这是"按在线设备重排"的必然结果:拔掉一台,后面的编号会前移。
 - **菜单不过滤虚拟音频设备。** 录屏、回环一类虚拟端点只要处于 active 就会出现在菜单里,需自行忽略。
-- **异常落盘。** `WndProc` 里的异常不静默吞掉,会记到 exe 同目录的 `diag.txt`,便于事后定位。
+- **异常与失败落盘,不静默吞掉。** `WndProc` 抛出的异常、切换失败、属性库打不开、日志本身写不进去,都会记进 `diag.txt`(exe 旁边,不可写时退到 `%LOCALAPPDATA%\Audiolite\`)。诊断只记异常路径,正常运行时这个文件不存在。
 
 ## 许可证
 
