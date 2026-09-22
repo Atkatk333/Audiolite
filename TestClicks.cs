@@ -15,7 +15,7 @@ static class TestClicks
         total++;
         Audiolite.ResetClicks();
         var got = new List<Audiolite.TrayAction>();
-        for (int i = 0; i < lows.Length; i++) got.Add(Audiolite.Classify(lows[i], times[i]));
+        for (int i = 0; i < lows.Length; i++) got.Add(Audiolite.Classify(lows[i], (ulong)times[i]));
 
         bool ok = got.Count == expect.Length;
         if (ok)
@@ -157,8 +157,35 @@ static class TestClicks
              "2026-09-21 11:47");
     }
 
+    // 左键的"上一台"记账。它坏过一次很隐蔽的形态:外部把默认设备换成我们记住的
+    // 那一台之后,左键就变成每次弹成功横幅的空操作,且永远回不来。
+    static void History()
+    {
+        Case("外部换了设备 -> 上一台改成我们离开的那台", Audiolite.NextLast("A", "B", "C"), "B");
+        Case("自己切的(事件后到) -> 不动", Audiolite.NextLast("A", "C", "C"), "A");
+        Case("还没种下参照 -> 不动", Audiolite.NextLast("A", null, "C"), "A");
+        Case("读不到当前默认 -> 不动", Audiolite.NextLast("A", "B", null), "A");
+        Case("ID 比对忽略大小写", Audiolite.SameId("{ABC}", "{abc}") ? "same" : "diff", "same");
+        Case("ID 与 null 不同", Audiolite.SameId("{ABC}", null) ? "same" : "diff", "diff");
+
+        // 编号必须对"这一批"整体做:排序 + 组内计数 + 拼名字一步完成。
+        // 注意 Number() 会就地重排:扬声器那台装机最早,排在最前。
+        var batch = new List<Audiolite.Entry>
+        {
+            E("{1}", "耳机", "USB 耳机", "2024-01-01"),
+            E("{2}", "耳机", "蓝牙耳机", "2025-01-01"),
+            E("{3}", "扬声器", "内置扬声器", "2020-01-01"),
+        };
+        Audiolite.Number(batch);
+        Case("整批编号:排到最前的装机最早那台", batch[0].Name, "扬声器 (内置扬声器)");
+        Case("整批编号:组内第一台不编号", batch[1].Name, "耳机 (USB 耳机)");
+        Case("整批编号:组内第二台编号", batch[2].Name, "耳机 2 (蓝牙耳机)");
+    }
+
     // 实验:反复枚举 -> 看句柄是否累积 -> 强制 GC -> 看句柄是否回落。
     // 回落 = 句柄是 COM RCW 等终结器造成的,假设成立。
+    const int LeakLimit = 12;
+
     static void LeakProbe()
     {
         var self = System.Diagnostics.Process.GetCurrentProcess();
@@ -166,26 +193,36 @@ static class TestClicks
         GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
         self.Refresh();
         int baseH = self.HandleCount;
+        int worst = 0;
 
+        total++;
         for (int round = 1; round <= 3; round++)
         {
             for (int i = 0; i < 60; i++) Audiolite.EnumOnce();
             self.Refresh();
             int h = self.HandleCount;
+            worst = Math.Max(worst, h - baseH);
             Console.WriteLine("  第" + round + " 轮 60 次枚举后: 句柄=" + h + "  相对基线+" + (h - baseH)
                               + "  私有=" + (self.PrivateMemorySize64 / 1048576) + "MB");
         }
 
         for (int i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
         self.Refresh();
+        int afterGc = self.HandleCount - baseH;
         Console.WriteLine("  强制GC后: 句柄=" + self.HandleCount + "  私有=" + (self.PrivateMemorySize64 / 1048576) + "MB");
+
+        bool ok = worst <= LeakLimit && afterGc <= LeakLimit;
+        Console.WriteLine((ok ? "PASS  " : "FAIL  ") + "180 次枚举后句柄必须收敛  峰值+" + worst
+                          + " GC后+" + afterGc + "  阈值+" + LeakLimit);
+        if (!ok) failed++;
     }
 
     static int Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "--leak") { LeakProbe(); return 0; }
+        if (args.Length > 0 && args[0] == "--leak") { LeakProbe(); return failed == 0 ? 0 : 1; }
 
         Names();
+        History();
         FadeSequenceMustOnlyShrink();
         // 真机日志:15:45:00.172 按下 / 15:45:00.172 抬起 —— 同一毫秒
         Seq("左键 按下+抬起(同一毫秒)",

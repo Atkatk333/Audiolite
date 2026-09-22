@@ -225,11 +225,11 @@ internal static class Audiolite
         if (com != null) Marshal.ReleaseComObject(com);
     }
 
-    static List<Entry> All()
+    static List<Entry> All(uint stateMask)
     {
         var list = new List<Entry>();
         IMMDeviceCollection coll;
-        if (En().EnumAudioEndpoints(eRender, AllStates, out coll) != 0) return list;
+        if (En().EnumAudioEndpoints(eRender, stateMask, out coll) != 0) return list;
         try
         {
             uint n;
@@ -273,15 +273,19 @@ internal static class Audiolite
 
     // 编号和排列都只按"这一批要显示出来的设备"算:连几台就编到几,
     // 谁先接入谁排前面,不留空洞。
+    internal static List<Entry> Number(List<Entry> batch)
+    {
+        batch.Sort(ByOrder);
+        AssignRanks(batch);
+        foreach (Entry e in batch) e.Name = Label(e.Category, e.Desc, e.Rank, e.Total);
+        return batch;
+    }
+
+    // 掩码直接下传给 EnumAudioEndpoints:菜单只要 3 台 active 时,就不该为了
+    // 另外 7 台去开属性库(每次都要跨进第三方音频属性插件一趟)。
     static List<Entry> Render(uint stateMask)
     {
-        var list = new List<Entry>();
-        foreach (Entry e in All())
-            if ((e.State & stateMask) != 0) list.Add(e);
-        list.Sort(ByOrder);
-        AssignRanks(list);
-        foreach (Entry e in list) e.Name = Label(e.Category, e.Desc, e.Rank, e.Total);
-        return list;
+        return Number(All(stateMask));
     }
 
     static string DefaultId(int role)
@@ -344,7 +348,9 @@ internal static class Audiolite
 
     internal enum TrayAction { None, Toggle, Menu }
 
-    internal static TrayAction Classify(uint low, int now)
+    [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+
+    internal static TrayAction Classify(uint low, ulong now)
     {
         TrayAction a = TrayAction.None;
         if (low == WM_LBUTTONUP || low == WM_MBUTTONUP) a = TrayAction.Toggle;
@@ -355,6 +361,8 @@ internal static class Audiolite
         if (a == TrayAction.None) return TrayAction.None;
 
         // 视觉双击会被 shell 拆成 抬起+双击+抬起,去抖让它只算一次切换。
+        // 用 64 位tick:32 位的 Environment.TickCount 约 24.8 天回绕一次,
+        // 回绕瞬间 now - lastClickTick 变负,那之后的首次点击会被吞掉。
         if (now - lastClickTick < 250) return TrayAction.None;
         lastClickTick = now;
         return a;
@@ -362,30 +370,77 @@ internal static class Audiolite
 
     internal static void ResetClicks() { lastClickTick = 0; }
 
+    static string seenDefault;
+
+    internal static bool SameId(string a, string b)
+    {
+        return a != null && b != null && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // 外部换了设备(Windows 音量浮窗、某个应用独占切换)时,"上一台"必须跟着改,
+    // 否则它会停在当前这台设备上,左键从此变成一次"弹成功横幅的空操作",
+    // 而且没有任何自愈路径。返回应当记住的那一台;不改时原样返回。
+    internal static string NextLast(string remembered, string seen, string now)
+    {
+        if (now == null) return remembered;
+        if (seen != null && !SameId(seen, now)) return seen;
+        return remembered;
+    }
+
     static Entry Last()
     {
         if (lastId == null) return null;
-        return Render(Active).Find(e => string.Equals(e.Id, lastId, StringComparison.OrdinalIgnoreCase));
+        return Render(Active).Find(e => SameId(e.Id, lastId));
     }
 
-    // 切到 target,并把"离开的那台"记成上一台,供左键回切。
-    static void ApplySwitch(Entry target)
+    internal enum SwitchOutcome { Switched, AlreadyCurrent, Failed }
+
+    // 执行切换并记账,不碰 UI:命令行和托盘共用这一份,别各写一套账。
+    static SwitchOutcome TrySwitch(Entry target, out string current)
     {
-        string old = DefaultId(eConsole);
-        if (old != null && !string.Equals(old, target.Id, StringComparison.OrdinalIgnoreCase))
+        current = DefaultId(eConsole);
+        if (SameId(current, target.Id)) return SwitchOutcome.AlreadyCurrent;
+
+        int hrConsole, hrMultimedia;
+        bool hrOk = SetDefault(target, out hrConsole, out hrMultimedia);
+
+        // 回读而不是相信返回值:AudioEndpointBuilder 重启、端点在枚举之后消失,
+        // 都会让"两个 HRESULT 都成功但默认设备其实没换"成为可能。
+        string now = DefaultId(eConsole);
+        if (!hrOk || !SameId(now, target.Id))
         {
-            lastId = old;
-            SaveLast();
+            Diag("switch " + target.Id + " hr=" + Hex(hrConsole) + "/" + Hex(hrMultimedia)
+                 + " nowDefault=" + (now ?? "null"));
+            return SwitchOutcome.Failed;
         }
-        SetDefault(target);
-        ShowBanner(target.Name);
+
+        if (current != null) { lastId = current; SaveLast(); }
+        seenDefault = target.Id;
+        return SwitchOutcome.Switched;
     }
 
-    static void SetDefault(Entry target)
+    static string Hex(int hr) { return "0x" + hr.ToString("X8"); }
+
+    static void ApplySwitch(Entry target, bool fallBackToMenu)
+    {
+        string current;
+        SwitchOutcome o = TrySwitch(target, out current);
+        if (o == SwitchOutcome.AlreadyCurrent)
+        {
+            // 目标已经是当前默认。这时候弹一张成功横幅就是骗人。
+            if (fallBackToMenu) ShowMenu();
+            else ShowBanner("已经是:" + target.Name);
+            return;
+        }
+        ShowBanner(o == SwitchOutcome.Switched ? target.Name : "切换失败:" + target.Name);
+    }
+
+    static bool SetDefault(Entry target, out int hrConsole, out int hrMultimedia)
     {
         if (policy == null) policy = (IPolicyConfig)new PolicyConfigClient();
-        policy.SetDefaultEndpoint(target.Id, eConsole);
-        policy.SetDefaultEndpoint(target.Id, eMultimedia);
+        hrConsole = policy.SetDefaultEndpoint(target.Id, eConsole);
+        hrMultimedia = policy.SetDefaultEndpoint(target.Id, eMultimedia);
+        return hrConsole == 0 && hrMultimedia == 0;
     }
 
     // ---------------------------------------------------------------- Win32
@@ -393,7 +448,7 @@ internal static class Audiolite
     const uint WM_DESTROY = 0x0002, WM_TIMER = 0x0113, WM_PAINT = 0x000F;
     const uint WM_TRAY = 0x0401, WM_REFRESH = 0x0402;
     const uint WM_LBUTTONUP = 0x0202, WM_RBUTTONUP = 0x0205, WM_MBUTTONUP = 0x0208;
-    static int lastClickTick;
+    static ulong lastClickTick;
 
     const uint NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
     const uint NIM_ADD = 0, NIM_MODIFY = 1, NIM_DELETE = 2, NIM_SETVERSION = 4;
@@ -404,6 +459,10 @@ internal static class Audiolite
     const uint WS_EX_TOOLWINDOW = 0x0080;
     const uint WS_EX_LAYERED = 0x00080000;
     const uint WS_EX_NOACTIVATE = 0x08000000;
+    const uint WS_EX_TRANSPARENT = 0x00000020;
+
+    const uint WM_WINDOWPOSCHANGING = 0x0046, WM_ACTIVATE = 0x0006;
+    const uint SWP_NOACTIVATE = 0x0010;
 
     const uint CS_HREDRAW = 0x0002, CS_VREDRAW = 0x0001;
 
@@ -455,6 +514,9 @@ internal static class Audiolite
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WINDOWPOS { public IntPtr hwnd; public IntPtr hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
 
     delegate IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -545,11 +607,11 @@ internal static class Audiolite
         {
             if (msg == WM_TRAY)
             {
-                switch (Classify((uint)(lParam.ToInt64() & 0xFFFF), Environment.TickCount))
+                switch (Classify((uint)(lParam.ToInt64() & 0xFFFF), GetTickCount64()))
                 {
                     case TrayAction.Toggle:
                         Entry prev = Last();
-                        if (prev != null) ApplySwitch(prev);
+                        if (prev != null) ApplySwitch(prev, true);
                         else ShowMenu();
                         break;
                     case TrayAction.Menu:
@@ -558,7 +620,7 @@ internal static class Audiolite
                 }
                 return IntPtr.Zero;
             }
-            if (msg == WM_REFRESH) { UpdateTip(); return IntPtr.Zero; }
+            if (msg == WM_REFRESH) { OnRefresh(); return IntPtr.Zero; }
             // explorer 重启会把所有托盘图标清掉,并广播这条消息;不重注册的话
             // 图标就没了,而进程还活着——再双击会被单实例互斥静默挡掉。
             if (wmTaskbarCreated != 0 && msg == wmTaskbarCreated) { AddTrayIcon(); UpdateTip(); return IntPtr.Zero; }
@@ -566,6 +628,16 @@ internal static class Audiolite
         }
         catch (Exception e) { Diag("TRAY WNDPROC " + MsgName(msg) + " threw: " + e.GetType().Name + ": " + e.Message); }
         return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    // 设备事件的唯一落点:先把历史对正,再刷 tooltip。
+    static void OnRefresh()
+    {
+        string now = DefaultId(eConsole);
+        string next = NextLast(lastId, seenDefault, now);
+        if (!SameId(next, lastId)) { lastId = next; SaveLast(); }
+        if (now != null) seenDefault = now;
+        UpdateTip();
     }
 
     static void UpdateTip()
@@ -581,7 +653,19 @@ internal static class Audiolite
     // 必须在 Trim 之后做,否则截断可能把成对的 && 劈开。
     internal static string MenuEsc(string s) { return s.Replace("&", "&&"); }
 
+    // TrackPopupMenuEx 自己跑一个模态消息循环:菜单开着时的第二次托盘点击会
+    // 嵌套进第二个菜单,250ms 去抖挡不住这个(它挡的是同一次点击的重复抬起)。
+    static bool inMenu;
+
     static void ShowMenu()
+    {
+        if (inMenu) return;
+        inMenu = true;
+        try { TrackMenu(); }
+        finally { inMenu = false; }
+    }
+
+    static void TrackMenu()
     {
         List<Entry> targets = Render(Active);
         string current = DefaultId(eConsole);
@@ -589,7 +673,7 @@ internal static class Audiolite
         for (int i = 0; i < targets.Count; i++)
         {
             AppendMenuW(menu, MF_STRING, new IntPtr(i + 1), MenuEsc(Trim(targets[i].Name, 60)));
-            if (string.Equals(targets[i].Id, current, StringComparison.OrdinalIgnoreCase))
+            if (SameId(targets[i].Id, current))
                 CheckMenuItem(menu, (uint)(i + 1), MF_CHECKED);
         }
         AppendMenuW(menu, MF_SEPARATOR, IntPtr.Zero, null);
@@ -603,7 +687,7 @@ internal static class Audiolite
         DestroyMenu(menu);
 
         if (cmd == MENU_QUIT) PostMessageW(trayHwnd, WM_DESTROY, IntPtr.Zero, IntPtr.Zero);
-        else if (cmd >= 1 && cmd <= targets.Count) ApplySwitch(targets[cmd - 1]);
+        else if (cmd >= 1 && cmd <= targets.Count) ApplySwitch(targets[cmd - 1], false);
     }
 
     // ---------------------------------------------------------------- 横幅
@@ -628,12 +712,26 @@ internal static class Audiolite
     {
         try
         {
+            // 不抢焦点要四层,缺任何一层都会在某个改几何的瞬间漏出去:
+            // WS_EX_NOACTIVATE + SW_SHOWNOACTIVATE 管住显示时,
+            // 下面两条管住"改位置/被激活"时。
+            if (msg == WM_WINDOWPOSCHANGING)
+            {
+                WINDOWPOS wp = (WINDOWPOS)Marshal.PtrToStructure(lParam, typeof(WINDOWPOS));
+                wp.flags |= SWP_NOACTIVATE;
+                Marshal.StructureToPtr(wp, lParam, false);
+                return IntPtr.Zero;
+            }
+            if (msg == WM_ACTIVATE) return IntPtr.Zero;
             if (msg == WM_PAINT) { PaintBanner(hWnd); return IntPtr.Zero; }
             if (msg == WM_TIMER)
             {
                 if (wParam.ToInt32() == TIMER_HIDE)
                 {
                     KillTimer(hWnd, wParam);
+                    // 诊断模式没有标题栏、又是 WS_POPUP,收不到 Alt+F4:让它自己退出,
+                    // 否则 --bannertest 会留下一个只能杀进程的常驻窗口。
+                    if (bannerSticky) { PostQuitMessage(0); return IntPtr.Zero; }
                     SetTimer(hWnd, new IntPtr(TIMER_FADE), 40, IntPtr.Zero);
                 }
                 else if (wParam.ToInt32() == TIMER_FADE)
@@ -794,7 +892,9 @@ internal static class Audiolite
         CreateBannerWindow(RegisterClasses());
         bannerSticky = true;
         ShowBanner(text);
-        Diag("BANNERTEST dpi=" + dpi + " scale=" + dpiScale + " screen=" + ScreenW() + "x" + ScreenH());
+        SetTimer(bannerHwnd, new IntPtr(TIMER_HIDE), 5000, IntPtr.Zero);
+        Diag("BANNERTEST dpi=" + dpi + " scale=" + dpiScale + " screen=" + ScreenW() + "x" + ScreenH()
+             + " banner=" + lastBannerW + "x" + lastBannerH + " text=\"" + text + "\"");
         MSG m;
         while (GetMessageW(out m, IntPtr.Zero, 0, 0) > 0)
         {
@@ -819,7 +919,9 @@ internal static class Audiolite
     static void CreateBannerWindow(IntPtr hInst)
     {
         bannerHwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            // WS_EX_TRANSPARENT:不加它,横幅显示的 1.6 秒里落在右下角那块矩形上
+            // 的点击会被一个顶层窗口吃掉——无边框窗口游戏时那块正是游戏画面。
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             "AudioliteBanner", null, WS_POPUP, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, hInst, IntPtr.Zero);
     }
 
@@ -939,23 +1041,61 @@ internal static class Audiolite
     {
         SetProcessDPIAware();
 
-        if (args.Length > 0 && args[0] == "--list") return List();
-        if (args.Length > 0 && args[0] == "--version")
+        // 显式分派,不再靠"谁都不匹配就落到最后"。原先 --tray 在源码里根本没出现,
+        // README 教的自启参数只是碰巧能用;打错字也会静默起一个托盘。
+        if (args.Length == 0 || args[0] == "--tray") return AlreadyRunning() ? 0 : RunTray();
+
+        switch (args[0])
         {
-            Console.WriteLine(Assembly.GetExecutingAssembly().GetName().Version.ToString());
+            case "--list": return List();
+            case "--menu": return Menu();
+            case "--props": return Props();
+            case "--help": Help(); return 0;
+            case "--version":
+                Console.WriteLine(Assembly.GetExecutingAssembly().GetName().Version.ToString());
+                return 0;
+            case "--set": return args.Length == 2 ? Set(args[1]) : Usage(" --set 需要一个 ID");
+            case "--bannertest": return args.Length == 2 ? BannerTest(args[1]) : Usage(" --bannertest 需要一个文本");
+        }
+        return Usage("未知参数 " + args[0]);
+    }
+
+    static int Usage(string why)
+    {
+        Console.Error.WriteLine("Audiolite: " + why);
+        Help();
+        return 2;
+    }
+
+    static void Help()
+    {
+        Console.WriteLine("用法: Audiolite [--tray] [选项]");
+        Console.WriteLine("  (无参数)     托盘模式,左键回切上一台、右键列设备(单实例)");
+        Console.WriteLine("  --list       全部渲染端点及其状态,当前默认标 *");
+        Console.WriteLine("  --menu       右键菜单会显示的内容");
+        Console.WriteLine("  --props      端点属性原始值(排查命名用)");
+        Console.WriteLine("  --set <ID>   直接设为指定设备(会真的改声音输出)");
+        Console.WriteLine("  --bannertest <文本>  只画一次横幅,5 秒后自动退出");
+        Console.WriteLine("  --version    打印版本号");
+    }
+
+    static int Set(string id)
+    {
+        foreach (Entry e in Render(AllStates))
+        {
+            if (!SameId(e.Id, id)) continue;
+            string current;
+            SwitchOutcome o = TrySwitch(e, out current);
+            if (o == SwitchOutcome.Failed)
+            {
+                Console.Error.WriteLine("切换失败,细节见 diag.txt:" + e.Name);
+                return 1;
+            }
+            Console.WriteLine((o == SwitchOutcome.AlreadyCurrent ? "已经是: " : "已切换: ") + e.Name);
             return 0;
         }
-        if (args.Length > 0 && args[0] == "--props") return Props();
-        if (args.Length > 0 && args[0] == "--menu") return Menu();
-        if (args.Length == 2 && args[0] == "--bannertest") return BannerTest(args[1]);
-        if (args.Length == 2 && args[0] == "--set")
-        {
-            foreach (Entry e in Render(AllStates))
-                if (string.Equals(e.Id, args[1], StringComparison.OrdinalIgnoreCase)) { SetDefault(e); return 0; }
-            return 1;
-        }
-        if (AlreadyRunning()) return 0;
-        return RunTray();
+        Console.Error.WriteLine("找不到端点 ID " + id + ",完整列表见 --list");
+        return 2;
     }
 
     static void AddTrayIcon()
@@ -1003,7 +1143,7 @@ internal static class Audiolite
         int reg = En().RegisterEndpointNotificationCallback(watcher);
         if (reg != 0) Diag("RegisterEndpointNotificationCallback -> 0x" + reg.ToString("X8"));
         LoadLast();
-        UpdateTip();
+        OnRefresh();   // 顺带把 seenDefault 种成当前默认,外部切换才有参照
 
         MSG m;
         while (GetMessageW(out m, IntPtr.Zero, 0, 0) > 0)
