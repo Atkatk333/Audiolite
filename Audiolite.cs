@@ -342,35 +342,31 @@ internal static class Audiolite
         if (!string.IsNullOrEmpty(local)) yield return Path.Combine(local, "Audiolite");
     }
 
-    static string DiagPath()
-    {
-        if (diagDir != null) return Path.Combine(diagDir, "diag.txt");
-        foreach (string dir in DataDirs())
-        {
-            try
-            {
-                Directory.CreateDirectory(dir);
-                diagDir = dir;
-                return Path.Combine(dir, "diag.txt");
-            }
-            catch (Exception) { }
-        }
-        diagDir = "";
-        return null;
-    }
-
-    static string diagDir;
+    static string diagDir;   // 只缓存"证明写得动"的那个目录;失败不缓存,否则目录后来变得可写就再也写不进
 
     // 记账:两处都写不进时不抛出去 —— 记不下来事情,不该把调用方一起带下水。
+    // 选址必须用真正的写入去试:只问"目录能不能创建"是错的 —— 一个存在但只读的
+    // 目录(Program Files、U 盘、网络盘,或 diag.txt 被占住)永远返回"能",
+    // 于是日志被静默丢掉。实测过这个形状:回退不生效,两处都没有 diag.txt。
     static void Diag(string s)
     {
-        string p = DiagPath();
-        if (p == null) return;
+        string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + s + Environment.NewLine;
+        if (diagDir != null && TryWrite(diagDir, line)) return;
+        foreach (string dir in DataDirs())
+        {
+            if (TryWrite(dir, line)) { diagDir = dir; return; }
+        }
+    }
+
+    static bool TryWrite(string dir, string line)
+    {
         try
         {
-            File.AppendAllText(p, DateTime.Now.ToString("HH:mm:ss.fff") + "  " + s + Environment.NewLine);
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "diag.txt"), line);
+            return true;
         }
-        catch (Exception) { }
+        catch (Exception) { return false; }
     }
 
     // 记忆落盘:否则每次重启后左键都只能退回菜单。
