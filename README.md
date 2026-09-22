@@ -85,8 +85,10 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 & $csc -nologo -noconfig -r:System.dll -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
 .\test.exe
-.\test.exe --leak     # 句柄增长:180 次枚举峰值与强制 GC 后的增量都必须在 +12 以内,否则退出码 1
+.\test.exe --leak     # 真机自检:180 次枚举后句柄增长须在 +12 内;且 active 视图不许混进别的状态、全量视图须与直接问 COM 的计数一致
 ```
+
+编号与掩码语义这两处过不了纯函数测试(前者要求喂真到达时间,后者整个在 COM 调用里),所以用变异测试卡住:把排序键换成安装时间、把菜单的过滤去掉、把全量掩码从 0xF 退回 7,现在都会让测试失败。
 
 ## 已知边界
 

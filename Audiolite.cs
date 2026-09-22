@@ -21,8 +21,8 @@ internal static class Audiolite
     const int eConsole = 0, eMultimedia = 1;
     // 取值是 mmdeviceapi.h 的 EDEVICE_STATE_TYPE:2 是 DISABLED、8 才是 UNPLUGGED,
     // 全量掩码是 0xF。
-    const uint Active = 1, Disabled = 2, NotPresent = 4, Unplugged = 8;
-    const uint AllStates = 0xF;
+    internal const uint Active = 1, Disabled = 2, NotPresent = 4, Unplugged = 8;
+    internal const uint AllStates = 0xF;
 
     [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
     class CMMDeviceEnumerator { }
@@ -291,9 +291,21 @@ internal static class Audiolite
 
     // 掩码直接下传给 EnumAudioEndpoints:菜单只要 3 台 active 时,就不该为了
     // 另外 7 台去开属性库(每次都要跨进第三方音频属性插件一趟)。
-    static List<Entry> Render(uint stateMask)
+    internal static List<Entry> Render(uint stateMask)
     {
         return Number(All(stateMask));
+    }
+
+    // 不经本程序任何加工、直接问 COM 的端点数:给测试当独立参照。
+    // 掩码在这里是写死的字面量,所以"AllStates 被改回 7"这类退化瞒不过去。
+    internal static int CountRaw(uint stateMask)
+    {
+        IMMDeviceCollection coll;
+        if (En().EnumAudioEndpoints(eRender, stateMask, out coll) != 0) return -1;
+        uint n;
+        coll.GetCount(out n);
+        Rel(coll);
+        return (int)n;
     }
 
     static string DefaultId(int role)

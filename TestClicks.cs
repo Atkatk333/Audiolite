@@ -215,6 +215,20 @@ static class TestClicks
         Console.WriteLine((ok ? "PASS  " : "FAIL  ") + "180 次枚举后句柄必须收敛  峰值+" + worst
                           + " GC后+" + afterGc + "  阈值+" + LeakLimit);
         if (!ok) failed++;
+
+        // 掩码语义整条进了 COM 调用,纯函数测试碰不到:变异实验里"菜单不过滤"和
+        // "全量掩码退回 7"两个都能活下来。所以在这台真机上按不变量再验一次,
+        // 参照物是绕开本程序全部加工、直接问 COM 得到的计数。
+        total++;
+        List<Audiolite.Entry> active = Audiolite.Render(Audiolite.Active);
+        List<Audiolite.Entry> every = Audiolite.Render(Audiolite.AllStates);
+        int raw = Audiolite.CountRaw(0xF);
+        bool strays = active.Exists(delegate(Audiolite.Entry e) { return e.State != Audiolite.Active; });
+        bool ok2 = !strays && raw == every.Count && every.Count >= active.Count;
+        Console.WriteLine((ok2 ? "PASS  " : "FAIL  ") + "菜单只取 active、诊断取全部  全量=" + every.Count
+                          + " 直接问COM=" + raw + " active=" + active.Count
+                          + (strays ? "   active 里混进了别的状态" : ""));
+        if (!ok2) failed++;
     }
 
     static int Main(string[] args)
