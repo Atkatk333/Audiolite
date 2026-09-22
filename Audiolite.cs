@@ -566,7 +566,7 @@ internal static class Audiolite
     [DllImport("user32.dll")] static extern bool KillTimer(IntPtr h, IntPtr id);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT p, uint flags);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfoW(IntPtr mon, ref MONITORINFO mi);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool GetMonitorInfoW(IntPtr mon, ref MONITORINFO mi);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
     [DllImport("user32.dll")] static extern IntPtr CreatePopupMenu();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool AppendMenuW(IntPtr menu, uint flags, IntPtr id, string text);
@@ -577,7 +577,7 @@ internal static class Audiolite
     [DllImport("shell32.dll", SetLastError = true)] static extern bool Shell_NotifyIconW(uint msg, ref NOTIFYICONDATAW pnid);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint ExtractIconExW(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
-    const int SM_CXSMICON = 49;
+    const int SM_CXSCREEN = 0, SM_CYSCREEN = 1, SM_CXSMICON = 49;
 
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint color);
     [DllImport("gdi32.dll")] static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
@@ -818,8 +818,14 @@ internal static class Audiolite
         IntPtr mon = MonitorFromPoint(p, 0);
         MONITORINFO mi = new MONITORINFO();
         mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
-        GetMonitorInfoW(mon, ref mi);
         RECT work = mi.rcWork;
+        if (!GetMonitorInfoW(mon, ref mi) || mi.rcWork.right <= mi.rcWork.left)
+        {
+            // 失败时 mi 整块是全零,算出来是负坐标 —— 横幅会跑到屏幕外,
+            // 表现为"切换了但什么都没弹"。退回主屏尺寸,至少看得见。
+            Diag("GetMonitorInfo failed, gle=" + Marshal.GetLastWin32Error() + "; using primary screen");
+            work = new RECT { left = 0, top = 0, right = GetSystemMetrics(SM_CXSCREEN), bottom = GetSystemMetrics(SM_CYSCREEN) };
+        }
 
         // 量宽度用 DT_CALCRECT,不用 GetTextExtentPoint32W:前者量的正是下面
         // DrawTextW 要走的那套排版,不可能出现"量的是一套、画的另一套"。
