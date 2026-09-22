@@ -12,7 +12,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyFileVersion("0.5.0.0")]
 
 // 0 依赖托盘版:只用 user32 / gdi32 / shell32,不引用 WinForms 与 System.Drawing,
-// 因此 gdiplus / DWrite 全程不加载。图标是构建期生成的 speaker.ico。
+// 因此 gdiplus 全程不加载。托盘图标取系统音量程序里的图标。
 internal static class Audiolite
 {
     // ---------------------------------------------------------------- 音频 COM
@@ -38,7 +38,10 @@ internal static class Audiolite
     }
 
     // 顺序严格照 mmdeviceapi.h;错一个槽位原生端就会调到别的方法上。
-    [Guid("7991EEC9-7E89-4D85-8390-6C703CEC60C0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    // [ComImport] 不能省:这是本文件唯一需要被"实现"而不是被调用的接口,少了它
+    // CCW 不对外声明这个 IID(实测 QI 返回 E_NOINTERFACE),而 mmdevapi 注册时只存
+    // 裸指针、不做 QI 也不报错,于是回调落到 ToString/Equals 槽位上,永远不响。
+    [ComImport, Guid("7991EEC9-7E89-4D85-8390-6C703CEC60C0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMNotificationClient
     {
         [PreserveSig] int OnDeviceStateChanged([MarshalAs(UnmanagedType.LPWStr)] string id, uint newState);
@@ -123,8 +126,15 @@ internal static class Audiolite
         public DateTime Order { get { return Arrive == DateTime.MaxValue ? Install : Arrive; } }
     }
 
+    // 惰性创建:启动阶段音频服务还没就绪时,不该在 CLI 诊断分支之前就抛异常。
     static IMMDeviceEnumerator en;
     static IPolicyConfig policy;
+
+    static IMMDeviceEnumerator En()
+    {
+        if (en == null) en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(CMMDeviceEnumerator));
+        return en;
+    }
 
     static readonly Guid DevProp = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0");
     static readonly Guid DescProp = new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc");
@@ -205,7 +215,6 @@ internal static class Audiolite
     // 供回归测试调用的枚举入口:走的是和菜单/提示完全相同的枚举路径。
     internal static int EnumOnce()
     {
-        if (en == null) en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(CMMDeviceEnumerator));
         return Render(Active).Count;
     }
 
@@ -220,7 +229,7 @@ internal static class Audiolite
     {
         var list = new List<Entry>();
         IMMDeviceCollection coll;
-        if (en.EnumAudioEndpoints(eRender, AllStates, out coll) != 0) return list;
+        if (En().EnumAudioEndpoints(eRender, AllStates, out coll) != 0) return list;
         try
         {
             uint n;
@@ -278,7 +287,7 @@ internal static class Audiolite
     static string DefaultId(int role)
     {
         IMMDevice dev;
-        if (en.GetDefaultAudioEndpoint(eRender, role, out dev) != 0) return null;
+        if (En().GetDefaultAudioEndpoint(eRender, role, out dev) != 0) return null;
         string id;
         dev.GetId(out id);
         Rel(dev);
@@ -286,28 +295,51 @@ internal static class Audiolite
     }
 
     // 记忆落盘:否则每次重启后左键都只能退回菜单。
-    static string StatePath()
+    // exe 旁边优先(绿色程序的本分);放在只读位置时退到 %LOCALAPPDATA%,
+    // 两处都写不了才算真失败——失败必须留日志,静默失效是招牌功能的死法。
+    static IEnumerable<string> StatePaths()
     {
-        return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "state.txt");
+        yield return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "state.txt");
+        string local = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        if (!string.IsNullOrEmpty(local))
+        {
+            string dir = Path.Combine(local, "Audiolite");
+            try { Directory.CreateDirectory(dir); }
+            catch (Exception) { }
+            yield return Path.Combine(dir, "state.txt");
+        }
     }
 
     static void LoadLast()
     {
-        try
+        foreach (string p in StatePaths())
         {
-            if (File.Exists(StatePath()))
+            try
             {
-                string s = File.ReadAllText(StatePath()).Trim();
-                if (s.Length > 0) lastId = s;
+                if (!File.Exists(p)) continue;
+                string s = File.ReadAllText(p).Trim();
+                if (s.Length > 0) { lastId = s; return; }
             }
+            catch (Exception e) { Diag("LoadLast " + p + " -> " + e.GetType().Name + ": " + e.Message); }
         }
-        catch (Exception) { }
     }
 
     static void SaveLast()
     {
-        try { File.WriteAllText(StatePath(), lastId ?? ""); }
-        catch (Exception) { }
+        string text = lastId ?? "";
+        foreach (string p in StatePaths())
+        {
+            try
+            {
+                // 先写临时文件再换上去:直接 WriteAllText 若在写中途掉电,
+                // 留下半截 ID 会让 Last() 永远匹配不上,而又没有任何提示。
+                string tmp = p + ".tmp";
+                File.WriteAllText(tmp, text);
+                if (File.Exists(p)) File.Replace(tmp, p, null); else File.Move(tmp, p);
+                return;
+            }
+            catch (Exception e) { Diag("SaveLast " + p + " -> " + e.GetType().Name + ": " + e.Message); }
+        }
     }
 
     internal enum TrayAction { None, Toggle, Menu }
@@ -429,8 +461,11 @@ internal static class Audiolite
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string name);
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern uint GetDpiForSystem();
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowExW(uint ex, string cls, string name, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateWindowExW(uint ex, string cls, string name, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessageW(string name);
+    [DllImport("user32.dll")] static extern IntPtr LoadIconW(IntPtr hInst, IntPtr name);
+    const int IDI_APPLICATION = 32512;
     [DllImport("user32.dll")] static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] static extern bool PostQuitMessage(int code);
     [DllImport("user32.dll")] static extern int GetMessageW(out MSG m, IntPtr hWnd, uint first, uint last);
@@ -454,8 +489,10 @@ internal static class Audiolite
     [DllImport("user32.dll")] static extern bool DestroyMenu(IntPtr menu);
     [DllImport("user32.dll")] static extern int TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr hWnd, IntPtr param);
     [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
-    [DllImport("shell32.dll")] static extern bool Shell_NotifyIconW(uint msg, ref NOTIFYICONDATAW pnid);
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern uint ExtractIconExW(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
+    [DllImport("shell32.dll", SetLastError = true)] static extern bool Shell_NotifyIconW(uint msg, ref NOTIFYICONDATAW pnid);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint ExtractIconExW(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+    const int SM_CXSMICON = 49;
 
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint color);
     [DllImport("gdi32.dll")] static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
@@ -478,7 +515,9 @@ internal static class Audiolite
 
     static NOTIFYICONDATAW nid;
     static IntPtr trayHwnd, bannerHwnd, hIcon;
+    static bool iconOwned;
     static WndProc trayProc, bannerProc;
+    static uint wmTaskbarCreated;
     static string lastId;
     static string bannerText = "";
     static byte bannerAlpha = 255;
@@ -520,6 +559,9 @@ internal static class Audiolite
                 return IntPtr.Zero;
             }
             if (msg == WM_REFRESH) { UpdateTip(); return IntPtr.Zero; }
+            // explorer 重启会把所有托盘图标清掉,并广播这条消息;不重注册的话
+            // 图标就没了,而进程还活着——再双击会被单实例互斥静默挡掉。
+            if (wmTaskbarCreated != 0 && msg == wmTaskbarCreated) { AddTrayIcon(); UpdateTip(); return IntPtr.Zero; }
             if (msg == WM_DESTROY) { PostQuitMessage(0); return IntPtr.Zero; }
         }
         catch (Exception e) { Diag("TRAY WNDPROC " + MsgName(msg) + " threw: " + e.GetType().Name + ": " + e.Message); }
@@ -691,6 +733,35 @@ internal static class Audiolite
         if (!bannerSticky) SetTimer(bannerHwnd, new IntPtr(TIMER_HIDE), BannerMs, IntPtr.Zero);
     }
 
+    // 托盘图标:槽位尺寸随 DPI 变,16 槽用 16 帧才不发虚;两个帧都拿不到时
+    // 宁可退回系统应用图标,也不能挂一个"能点但看不见"的空句柄上去。
+    static IntPtr LoadTrayIcon()
+    {
+        string root = Environment.GetEnvironmentVariable("SystemRoot");
+        if (string.IsNullOrEmpty(root)) root = @"C:\Windows";
+        IntPtr[] big = new IntPtr[1];
+        IntPtr[] small = new IntPtr[1];
+        uint got = ExtractIconExW(Path.Combine(root, @"System32\SndVol.exe"), 0, big, small, 1);
+        if (got == 0) Diag("icon: ExtractIconExW found no frame in SndVol.exe");
+
+        bool wantSmall = GetSystemMetrics(SM_CXSMICON) <= 16;
+        IntPtr h = wantSmall ? small[0] : big[0];
+        IntPtr unused = wantSmall ? big[0] : small[0];
+        if (h == IntPtr.Zero) h = unused;
+        else if (unused != IntPtr.Zero) DestroyIcon(unused);
+
+        if (h == IntPtr.Zero)
+        {
+            // 共享句柄,退出时不能 DestroyIcon。
+            h = LoadIconW(IntPtr.Zero, new IntPtr(IDI_APPLICATION));
+            iconOwned = false;
+            Diag("icon: fell back to IDI_APPLICATION");
+            return h;
+        }
+        iconOwned = true;
+        return h;
+    }
+
     static IntPtr RegisterClasses()
     {
         IntPtr hInst = GetModuleHandleW(null);
@@ -702,14 +773,14 @@ internal static class Audiolite
         wc.lpfnWndProc = Marshal.GetFunctionPointerForDelegate(trayProc);
         wc.hInstance = hInst;
         wc.lpszClassName = "AudioliteTray";
-        RegisterClassExW(ref wc);
+        if (RegisterClassExW(ref wc) == 0) Diag("RegisterClassExW AudioliteTray failed, gle=" + Marshal.GetLastWin32Error());
 
         wc.lpfnWndProc = Marshal.GetFunctionPointerForDelegate(bannerProc);
         wc.lpszClassName = "AudioliteBanner";
         // 缺这两个标志时,窗口改尺寸只重绘新暴露区域,旧文字像素留在原地 -> 残影。
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.hbrBackground = IntPtr.Zero;
-        RegisterClassExW(ref wc);
+        if (RegisterClassExW(ref wc) == 0) Diag("RegisterClassExW AudioliteBanner failed, gle=" + Marshal.GetLastWin32Error());
         return hInst;
     }
 
@@ -781,7 +852,7 @@ internal static class Audiolite
         {
             Console.WriteLine("=== " + e.Name + "  [state=" + e.State + "]");
             IMMDevice dev;
-            if (en.GetDevice(e.Id, out dev) != 0) continue;
+            if (En().GetDevice(e.Id, out dev) != 0) continue;
             IPropertyStore ps;
             if (dev.OpenPropertyStore(0, out ps) != 0) { Rel(dev); continue; }
             uint c;
@@ -854,8 +925,19 @@ internal static class Audiolite
 
     static int Main(string[] args)
     {
+        // 启动期抛出来的一律落盘:这是 GUI 子系统进程,默认只会弹一个裸的 .NET
+        // 错误框,每次登录弹一次,而 diag.txt 里什么都不会留。
+        try { return Dispatch(args); }
+        catch (Exception e)
+        {
+            Diag("STARTUP " + e.GetType().Name + ": " + e.Message);
+            return 3;
+        }
+    }
+
+    static int Dispatch(string[] args)
+    {
         SetProcessDPIAware();
-        en = (IMMDeviceEnumerator)Activator.CreateInstance(typeof(CMMDeviceEnumerator));
 
         if (args.Length > 0 && args[0] == "--list") return List();
         if (args.Length > 0 && args[0] == "--version")
@@ -876,10 +958,24 @@ internal static class Audiolite
         return RunTray();
     }
 
+    static void AddTrayIcon()
+    {
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.szTip = "切换音频输出";
+        if (!Shell_NotifyIconW(NIM_ADD, ref nid))
+            Diag("Shell_NotifyIcon NIM_ADD failed, gle=" + Marshal.GetLastWin32Error());
+        // 不设 uVersion:经典布局下 lParam 低 16 位保证是鼠标消息。
+        // 设成 NOTIFYICON_VERSION_4 后该位置变成鼠标坐标,事件类型挪到 wParam 高位。
+    }
+
     static int RunTray()
     {
         uint dpi = GetDpiForSystem();
         dpiScale = dpi == 0 ? 1f : dpi / 96f;
+        if (dpi == 0) Diag("GetDpiForSystem returned 0, banner falls back to 100%");
+
+        wmTaskbarCreated = RegisterWindowMessageW("TaskbarCreated");
+        if (wmTaskbarCreated == 0) Diag("RegisterWindowMessage(TaskbarCreated) failed, gle=" + Marshal.GetLastWin32Error());
 
         IntPtr hInst = RegisterClasses();
 
@@ -887,29 +983,25 @@ internal static class Audiolite
         // 弹出的菜单收不到"点击别处"的关闭通知,会脱离托盘面板赖在屏幕上。
         trayHwnd = CreateWindowExW(WS_EX_TOOLWINDOW, "AudioliteTray", "Audiolite", WS_POPUP,
             -32000, -32000, 0, 0, IntPtr.Zero, IntPtr.Zero, hInst, IntPtr.Zero);
+        if (trayHwnd == IntPtr.Zero)
+        {
+            Diag("tray CreateWindowExW failed, gle=" + Marshal.GetLastWin32Error() + "; aborting");
+            return 3;
+        }
 
         CreateBannerWindow(hInst);
 
-        // 图标回退到上一版:直接取系统音量程序的图标。
-        IntPtr[] big = new IntPtr[1];
-        IntPtr[] small = new IntPtr[1];
-        ExtractIconExW(@"C:\Windows\System32\SndVol.exe", 0, big, small, 1);
-        hIcon = big[0] != IntPtr.Zero ? big[0] : small[0];
-
-
+        hIcon = LoadTrayIcon();
         nid = new NOTIFYICONDATAW();
         nid.cbSize = Marshal.SizeOf(typeof(NOTIFYICONDATAW));
         nid.hWnd = trayHwnd;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = hIcon;
-        nid.szTip = "切换音频输出";
-        Shell_NotifyIconW(NIM_ADD, ref nid);
-        // 不设 uVersion:经典布局下 lParam 低 16 位保证是鼠标消息。
-        // 设成 NOTIFYICON_VERSION_4 后该位置变成鼠标坐标,事件类型挪到 wParam 高位。
+        AddTrayIcon();
 
         watcher = new Watcher();
-        en.RegisterEndpointNotificationCallback(watcher);
+        int reg = En().RegisterEndpointNotificationCallback(watcher);
+        if (reg != 0) Diag("RegisterEndpointNotificationCallback -> 0x" + reg.ToString("X8"));
         LoadLast();
         UpdateTip();
 
@@ -922,8 +1014,9 @@ internal static class Audiolite
 
         nid.uFlags = 0;
         Shell_NotifyIconW(NIM_DELETE, ref nid);
-        en.UnregisterEndpointNotificationCallback(watcher);
-        if (hIcon != IntPtr.Zero) DestroyIcon(hIcon);
+        int unreg = En().UnregisterEndpointNotificationCallback(watcher);
+        if (unreg != 0) Diag("UnregisterEndpointNotificationCallback -> 0x" + unreg.ToString("X8"));
+        if (iconOwned && hIcon != IntPtr.Zero) DestroyIcon(hIcon);
         if (bannerFont != IntPtr.Zero) DeleteObject(bannerFont);
         return 0;
     }
