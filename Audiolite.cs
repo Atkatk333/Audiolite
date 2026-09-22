@@ -77,7 +77,10 @@ internal static class Audiolite
         [PreserveSig] int Commit();
     }
 
-    // SetDefaultEndpoint 必须在第 11 槽。
+    // 非公开接口,SDK 头文件里没有(audiopolicy.h 只有 IAud*Polic*)。槽位由下面
+    // 这个声明顺序决定:SetDefaultEndpoint 是第 11 个方法(不算 IUnknown 那 3 个,
+    // 落在 vtable 第 13 格)。顺序与 AudioConfig / DesktopManager / SoundSwitch 等
+    // 独立实现一致,并由行为验证 —— 调用后回读默认设备确实变了(见 TrySwitch)。
     [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IPolicyConfig
     {
