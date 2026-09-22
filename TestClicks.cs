@@ -141,6 +141,8 @@ static class TestClicks
         };
         fallback.Sort(Audiolite.ByOrder);
         Case("缺失接入时间时退回安装时间", fallback[0].Desc, "先装的那台");
+        Case("排序键标注:取到接入时间", EA("{z}", "耳机", "X", "2020-01-01", "2026-09-21 09:00").SortKind, "arrive");
+        Case("排序键标注:退回安装时间", E("{z}", "耳机", "X", "2020-01-01").SortKind, "install");
 
         Case("空描述不渲染成空括号", Audiolite.Label("耳机", "", 2, 2), "耳机");
         Case("菜单文本里 & 翻倍", Audiolite.MenuEsc("B&O Beoplay"), "B&&O Beoplay");

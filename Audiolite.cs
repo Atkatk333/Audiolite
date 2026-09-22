@@ -127,6 +127,10 @@ internal static class Audiolite
 
         // 排序键:优先用接入时间,拿不到时退回安装时间,保证顺序总是确定的。
         public DateTime Order { get { return Arrive == DateTime.MaxValue ? Install : Arrive; } }
+
+        // 本机的接入时间属性只覆盖一部分端点,所以"顺序看着不对"有两种完全不同的
+        // 成因。--list 里不写明这点,排查时就只能猜。
+        internal string SortKind { get { return Arrive == DateTime.MaxValue ? "install" : "arrive"; } }
     }
 
     // 惰性创建:启动阶段音频服务还没就绪时,不该在 CLI 诊断分支之前就抛异常。
@@ -1113,8 +1117,10 @@ internal static class Audiolite
     static int List()
     {
         string def = DefaultId(eConsole);
+        Console.WriteLine("#\tstate\t排序键\tID\t菜单名");
         foreach (Entry e in Render(AllStates))
-            Console.WriteLine("{0}\t{1}\t{2}\t{3}", e.Id == def ? "*" : " ", StateName(e.State), e.Id, e.Name);
+            Console.WriteLine("{0}\t{1}\t{2}\t{3}\t{4}", e.Id == def ? "*" : " ", StateName(e.State),
+                              e.SortKind, e.Id, e.Name);
         return 0;
     }
 
