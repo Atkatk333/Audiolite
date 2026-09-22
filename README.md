@@ -4,111 +4,106 @@
 ![Downloads](https://img.shields.io/github/downloads/Atkatk333/Audiolite/total)
 ![License](https://img.shields.io/github/license/Atkatk333/Audiolite)
 
-Windows 托盘音频输出切换器:点一下图标换一台输出设备。单个 exe 文件,无常驻依赖,私有内存十几 MB。
+Windows 托盘音频输出切换器,点图标切换输出设备。单个 exe 文件,无外部依赖,常驻内存约 10 MB。
 
 ## 下载
 
-**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** 下载后直接双击运行。不需要配置文件,不需要同目录的其它文件,不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。仅支持 Windows 10/11。
+[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest),双击即可运行。无需配置文件,无需安装运行时(.NET Framework 4.8.1 由系统提供)。支持 Windows 10/11。
 
-它只写两个文件:`state.txt` 记住上一台设备(左键回切靠它),`diag.txt` 只在出错时产生。exe 所在目录不可写时自动退到 `%LOCALAPPDATA%\Audiolite\`。`state.txt` 两处都写、读取时取较新的一份,某一处写失败会短暂分歧、下次写成功即自愈;`diag.txt` 只写第一个写得动的地方。
+程序写入两个文件:`state.txt` 保存上一台设备(左键回切使用),`diag.txt` 仅在出错时产生。exe 所在目录不可写时,改写到 `%LOCALAPPDATA%\Audiolite\`。`state.txt` 两处都写,读取时取修改时间较新的一份;`diag.txt` 只写第一个可写的目录。
 
-首次运行会被 SmartScreen 拦一下。本程序未做代码签名,Windows 大概率弹出 已保护你的电脑 / 未知发布者,点 **更多信息 → 仍要运行** 即可。这是所有未签名个人工具的通例,与程序本身是否有恶意无关。
+未做代码签名,首次运行会触发 SmartScreen 提示,选择 更多信息 → 仍要运行 即可。
 
-开机自启需自行添加:把 `Audiolite.exe --tray` 放进启动文件夹,或写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
+开机自启需自行添加:将 `Audiolite.exe --tray` 放入启动文件夹,或写入注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
 
 ## 用法
 
 | 操作 | 行为 |
 |---|---|
-| **左键** / 中键 | 切到上一台用过的设备;无历史时弹出菜单 |
-| **右键** | 列出所有在线输出设备,当前设备打勾 |
-| 每次切换 | 右下角显示目标设备名,1.6 秒后淡出;失败时显示 切换失败,不报假成功 |
+| 左键 / 中键 | 切换到上一台用过的设备;无历史记录时打开菜单 |
+| 右键 | 列出全部在线输出设备,当前设备打勾 |
+| 每次切换 | 右下角显示目标设备名,1.6 秒后淡出;切换失败时显示失败提示 |
 
-横幅不抢焦点,也不挡点击:游戏里的无边框窗口不会被最小化,落在右下角那块区域的点击会穿透到下面的窗口。
+横幅不获取焦点,不接收鼠标点击,不会最小化无边框窗口。
 
-鼠标悬停在图标上显示当前设备,你用 Windows 音量面板切换它也跟着变。上一台这笔账按真实默认设备对账,不会因为外部切换而卡住。
-
-单实例:重复启动静默退出,不会多出托盘图标。
+托盘图标的悬停文字显示当前设备,并随设备变更事件更新。单实例:重复启动时直接退出。
 
 ## 造轮子的初衷
 
-只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的 切换输出设备 这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算。
+原先使用 [SoundSwitch](https://github.com/Belphemur/SoundSwitch),只需要切换输出设备这一项功能,而它后台常驻的开销与这项功能不成比例。下表为本机 `Get-Process` 实测值。
 
-Audiolite 两列测于 2026-09-21 与 09-22 的构建,那两次构建的程序集版本都还是 0.5.0.0(版本号要到发新版才 bump),所以别拿版本号当指纹,要拿日期。新版发布后必须重测再引用:
-
-| | SoundSwitch 7.2.1 | Audiolite 刚启动 | Audiolite 连跑 6 小时 |
+| | SoundSwitch 7.2.1 | Audiolite 启动后 | Audiolite 连续运行 6 小时 |
 |---|---|---|---|
-| 私有内存 | 54.5 MB | **10.2 MB** | 17.9 MB |
-| 线程 | 29 | **10** | 13 |
-| 句柄 | 808 | **271** | 407 |
-| 后台轮询 | 定时全量枚举进程,源码默认 **2 秒**一次 | 无(事件驱动) | 无 |
+| 私有内存 | 54.5 MB | 10.2 MB | 17.9 MB |
+| 线程 | 29 | 10 | 13 |
+| 句柄 | 808 | 271 | 407 |
+| 后台轮询 | 定时全量枚举进程,源码默认间隔 2 秒 | 无,事件驱动 | 无 |
 | 开机开销 | 6 秒 CPU,82 万次注册表事件 | 无 | 无 |
-| 网络 | 有遥测 | 零网络导入 | 零网络导入 |
+| 网络 | 有遥测 | 无网络导入 | 无网络导入 |
 
-三条数据来源各不相同,别混着引用:
+数据来源与限制:
 
-- SoundSwitch 那列是 2026-09-21 卸载前在本机量的,已无法复测。
-- 轮询间隔引自上游源码 `SoundSwitch.Audio.Manager/ProcessMonitor.cs` 的默认参数 `intervalMs = 2000`(`AppModel.cs` 以无参方式构造它)。开机注册表事件数是另一件事,来自其仓库 issue [#2296](https://github.com/Belphemur/SoundSwitch/issues/2296)。
-- 连跑 6 小时 那列是 2026-09-22 在 Win11 22631 上量的。私有内存确实会随运行时间上涨,但**不是活跃泄漏**:空闲 25 秒两次采样的内存/句柄/线程三项零增长,180 次枚举句柄 +0/+1。涨上来的部分多半不是本程序引入的:67 个已加载模块里含第三方输入法整条链(`DWrite`, `d2d1`, `TextShaping`, `CrashRpt1500` 等)。所以零网络这个断言只对本程序自己成立,对被人塞进进程的代码不成立。
+- SoundSwitch 一列测于 2026-09-21,当晚该软件已卸载,无法复测。
+- 轮询间隔来自上游源码 `SoundSwitch.Audio.Manager/ProcessMonitor.cs` 的默认参数 `intervalMs = 2000`,由 `AppModel.cs` 以无参方式构造。开机注册表事件数来自其仓库 issue [#2296](https://github.com/Belphemur/SoundSwitch/issues/2296),与轮询无关。
+- Audiolite 两列分别测于 2026-09-21 与 2026-09-22(Win11 22631),对应程序集版本 0.5.0.0。0.5.1 及之后需重测。
+- 私有内存随运行时间上涨,但不是活跃泄漏:空闲 25 秒两次采样,内存/句柄/线程均无变化;180 次枚举后句柄增量 +0/+1。增量主要来自第三方模块:该进程加载了 67 个模块,其中包括输入法的 `DWrite`、`d2d1`、`TextShaping`、`CrashRpt1500` 等。程序自身无网络导入,第三方模块的行为不在此列。
 
 ## 命令行
 
 ```
-Audiolite.exe                 托盘模式:左键回切上一台,右键列出在线设备
-Audiolite.exe --tray          与无参数完全等价(自启配置里用哪个都行)
-Audiolite.exe --list          全部渲染端点(含未插入与已禁用):状态、排序键、ID、菜单名
-Audiolite.exe --menu          右键菜单会显示的内容
-Audiolite.exe --props         端点属性原始值,排查命名用
-Audiolite.exe --set <ID>      直接设为指定设备,真的会改声音输出
-Audiolite.exe --bannertest <文本>  只画一次切换横幅,5 秒后自动退出
-Audiolite.exe --version       打印版本号
-Audiolite.exe --help          以上全部
+Audiolite.exe                 托盘模式
+Audiolite.exe --tray          与无参数等价
+Audiolite.exe --list          全部渲染端点及状态、排序键、ID、菜单名
+Audiolite.exe --menu          右键菜单的内容
+Audiolite.exe --props         端点属性原始值
+Audiolite.exe --set <ID>      设为指定设备
+Audiolite.exe --bannertest <文本>  显示一次横幅,5 秒后退出
+Audiolite.exe --version       版本号
+Audiolite.exe --help          用法说明
 ```
 
-未知参数与缺参数一律输出到 stderr 并返回 2,不会静默起一个托盘。
+未识别或缺少参数的输入输出到 stderr,返回码 2,不会进入托盘模式。
 
 ## 设备命名与编号
 
-Windows 的消歧前缀塞在括号里(`耳机 (2- 蓝牙耳机A)`),且只在设备接口描述冲突时才加,同类别下可能出现只有 2 没有 1。本工具自己编号:按**当前在线的同名设备**重排(`耳机 2 (蓝牙耳机A)`),同组只有一台或排在最前时不编号。
+Windows 的消歧前缀加在括号内(`耳机 (2- 蓝牙耳机A)`),仅在设备接口描述冲突时出现,同一类别下可能只有 2 而没有 1。本程序改为按当前在线的同类别设备重新编号(`耳机 2 (蓝牙耳机A)`),组内只有一台或排在首位时不编号。
 
-排序键是端点的接入时间,取不到时退回安装时间。
+排序键取端点的接入时间,取不到时退回安装时间。
 
 ## 构建
 
-不需要安装任何东西,用 Windows 自带的 C# 编译器。`-noconfig` 会跳过编译器自带的那份默认引用清单,加上它还能编过,说明真的零外部引用:
+使用系统自带的 C# 编译器。`-noconfig` 跳过编译器的默认引用清单,加上该参数仍可通过编译,即无外部引用。
 
 ```powershell
-mkdir bin          # git 不跟踪空目录,全新 clone 得先建
+mkdir bin
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
   -nologo -noconfig -target:winexe -out:bin\Audiolite.exe Audiolite.cs
 ```
 
-目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` 与 `WinForms` 全程不加载,这是刚启动只有 10 MB 量级的原因。
+目标运行时为系统内置的 .NET Framework 4.8.1。`gdiplus` 与 `WinForms` 不会被加载。
 
-测试覆盖点击事件判定、命名编号、状态位映射、切换判定与记账、淡出序列。条数以 `test.exe` 输出末尾为准,不在此处钉死:
+测试:
 
 ```powershell
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 & $csc -nologo -noconfig -r:System.dll -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
-.\test.exe            # 含真机不变量:active 视图不许混进别的状态,全量视图须与直接问 COM 的计数一致
-.\test.exe --leak     # 再多跑一项:180 次枚举后句柄增长须在 +12 以内
+.\test.exe
+.\test.exe --leak
 ```
 
-覆盖情况如实分开列,免得被当成全测到了:
+测试覆盖点击事件判定、设备命名与编号、状态位映射、切换结果判定、横幅几何、状态文件读写、淡出序列。`--leak` 额外做两项本机检查:180 次枚举后的句柄增量须在 +12 以内;active 视图不得包含其他状态的端点,全量视图的计数须与直接向 COM 查询的结果一致。
 
-- 有断言且用变异测试卡住的:编号规则,切换判定,状态文件取值,临时文件清理,横幅几何。把排序键换成安装时间,去掉切换后的回读比对,去掉 上一台就是当前设备就清空记忆,让清空记号失效,去掉临时文件的时间判据,让 放得下 恒为真,这些变异都会被测试杀掉。
-- 只能在真机上按不变量校验的:掩码语义。`test.exe` 里那两条。
-- 没有断言的:横幅坐标越界只在运行时写进 `diag.txt`;以及切换成功后写 `lastId` 那行赋值,要覆盖它必须真改一次声音输出。
+纯函数测试无法覆盖的部分:掩码语义只在 `EnumAudioEndpoints` 的参数上生效,依赖本机检查;横幅坐标越界只记录到 `diag.txt`;切换成功后写入 `lastId` 这一行赋值没有断言,覆盖它需要真实切换一次输出设备。
 
 ## 已知边界
 
-- **接入时间属性是未公开的。** 排序用的 `{194ef948-…},2` 不在微软文档化的属性列表里。实测行为与最近一次接入时间一致(内置扬声器停在装机日,蓝牙耳机停在上次连接日),且已排除 上次设为默认时间 这一候选(设为默认不刷新它)。本机 16 个端点里只有 7 个带这个属性,取不到的那些按安装时间排,回退路径才是多数路径,`--list` 第 3 列直接标出每台走的是哪条。微软改语义的风险存在,但影响面只是菜单顺序,不影响切换正确性,真正用于切换的是 MMDevice ID。
-- **切换用的是未公开的 `IPolicyConfig`。** 微软没有文档化这个接口,SDK 头文件里也找不到(`audiopolicy.h` 只有 `IAudioPolicy*`)。虚表槽位靠多个独立实现相互印证,并由行为验证:每次调用后回读默认设备,不一致就判失败。
-- **只切控制台和多媒体两个角色,不切通信。** 这和 Windows 自带音量面板一致。显式按通信角色取设备的程序(Teams, YY 一类)输出不会跟着切。
-- **编号会随连接情况变化。** 这是按在线设备重排的必然结果:拔掉一台,后面的编号会前移。
-- **菜单不过滤虚拟音频设备。** 录屏与回环一类虚拟端点只要处于 active 就会出现在菜单里,需自行忽略。
-- **异常与失败落盘,不静默吞掉。** `WndProc` 抛出的异常,切换失败,属性库打不开,日志本身写不进去,都会记进 `diag.txt`(exe 旁边,不可写时退到 `%LOCALAPPDATA%\Audiolite\`)。诊断只记异常路径,正常运行时这个文件不存在。
+- 排序使用的接入时间属性 `{194ef948-…},2` 未见于微软文档。实测行为与最近一次接入时间一致,并已排除"上次设为默认时间"这一候选(设为默认不刷新该值)。本机 16 个端点中只有 7 个带有该属性,其余按安装时间排序,回退路径是多数路径,`--list` 第 3 列标明每台实际使用的键。若微软改变该属性语义,影响限于菜单顺序,不影响切换正确性,切换使用 MMDevice ID。
+- 切换默认设备使用未公开的 `IPolicyConfig` 接口,SDK 头文件中没有该接口(`audiopolicy.h` 只有 `IAudioPolicy*`)。虚表顺序依据多个独立实现,并通过调用后回读默认设备加以验证,回读不一致即判定失败。
+- 只设置控制台与多媒体两个角色,不设置通信角色,与 Windows 音量面板行为相同。按通信角色取设备的程序(Teams、YY 等)输出不会跟随切换。
+- 编号随连接情况变化:断开一台后,后续设备的编号前移。
+- 菜单不区分虚拟音频设备,处于 active 状态的虚拟端点会一并列出。
+- `WndProc` 异常、切换失败、属性库读取失败均记录到 `diag.txt`,不静默丢弃。正常运行时不产生该文件。
 
 ## 许可证
 
-MIT。详见 [LICENSE](LICENSE)。
+MIT,见 [LICENSE](LICENSE)。
