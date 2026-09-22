@@ -8,7 +8,7 @@ Windows 托盘音频输出切换器:点一下图标换一台输出设备。单�
 
 ## 下载
 
-**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。仅支持 Windows 10/11。
+**[Audiolite.exe](https://github.com/Atkatk333/Audiolite/releases/latest)** —— 下载后直接双击运行,不需要配置文件、不需要同目录的其它文件、不需要安装任何运行时(.NET Framework 4.8.1 是 Windows 内置组件)。只会在 exe 旁边写两个自己的文件:`state.txt`(记住上一台设备,左键回切靠它)和出错时才产生的 `diag.txt`。仅支持 Windows 10/11。
 
 **首次运行会被 SmartScreen 拦一下。** 本程序未做代码签名,Windows 大概率弹出"已保护你的电脑 / 未知发布者",点 **更多信息 → 仍要运行** 即可。这是所有未签名个人工具的通例,与程序本身是否有恶意无关。
 
@@ -28,7 +28,7 @@ Windows 托盘音频输出切换器:点一下图标换一台输出设备。单�
 
 ```
 Audiolite.exe [--tray]      托盘模式(默认,无参数即进入)
-Audiolite.exe --list        全部渲染端点及其状态
+Audiolite.exe --list        全部渲染端点(含未插入、已禁用)及其状态
 Audiolite.exe --menu        右键菜单会显示的内容
 Audiolite.exe --props       端点属性原始值(排查命名用)
 Audiolite.exe --set <ID>    直接设为指定设备
@@ -45,39 +45,46 @@ Windows 的消歧前缀塞在括号里(`耳机 (2- 蓝牙耳机A)`),且只在设
 
 只用得到 [SoundSwitch](https://github.com/Belphemur/SoundSwitch) 的"切换输出设备"这一项,而它后台常驻的成本远高于这一项。本机 `Get-Process` 实测对比,非估算:
 
-| | SoundSwitch 7.2.1 | Audiolite |
-|---|---|---|
-| 私有内存 | 54.5 MB | **10.2 MB** |
-| 线程 | 29 | **10** |
-| 句柄 | 808 | **271** |
-| 后台轮询 | 每 30 秒全量枚举进程 | **无**(事件驱动) |
-| 开机开销 | 6 秒 CPU、82 万次注册表事件 | 无 |
-| 遥测 | 有 | 无 |
+| | SoundSwitch 7.2.1 | Audiolite 刚启动 | Audiolite 连跑 6 小时 |
+|---|---|---|---|
+| 私有内存 | 54.5 MB | **10.2 MB** | 17.9 MB |
+| 线程 | 29 | **10** | 13 |
+| 句柄 | 808 | **271** | 407 |
+| 后台轮询 | 定时全量枚举进程,源码默认 **2 秒**一次 | 无(事件驱动) | 无 |
+| 开机开销 | 6 秒 CPU、82 万次注册表事件 | 无 | 无 |
+| 网络 | 有遥测 | 零网络导入 | 零网络导入 |
 
-其中开机阶段的轮询与注册表事件记录于 SoundSwitch 仓库 issue [#2296](https://github.com/Belphemur/SoundSwitch/issues/2296)。
+口径说明,三条数据来源各不一样,别混着引用:
+
+- SoundSwitch 那列是 2026-09-21 卸载前在本机量的,已无法复测。
+- 轮询间隔引自上游源码 `SoundSwitch.Audio.Manager/ProcessMonitor.cs` 的默认参数 `intervalMs = 2000`(`AppModel.cs` 以无参方式构造它);开机注册表事件数是另一件事,来自其仓库 issue [#2296](https://github.com/Belphemur/SoundSwitch/issues/2296)。
+- "连跑 6 小时"那列是 2026-09-22 在 Win11 22631 上量的。私有内存确实会随运行时间上涨,但**不是活跃泄漏**:空闲 25 秒两次采样的内存/句柄/线程三项零增长,180 次枚举句柄 +0/+1。涨上来的部分多半不是本程序引入的——67 个已加载模块里含第三方输入法整条链(`DWrite` / `d2d1` / `TextShaping` / `CrashRpt1500` 等),所以"零网络"这个断言只对本程序自己成立,对被人塞进进程的代码不成立。
 
 ## 构建
 
-不需要安装任何东西。用 Windows 自带的 C# 编译器,零外部引用:
+不需要安装任何东西,用 Windows 自带的 C# 编译器。`-noconfig` 会跳过编译器自带的那份默认引用清单,加上它还能编过,说明真的零外部引用:
 
 ```powershell
+mkdir bin          # git 不跟踪空目录,全新 clone 得先建
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe `
-  -nologo -target:winexe -out:bin\Audiolite.exe Audiolite.cs
+  -nologo -noconfig -target:winexe -out:bin\Audiolite.exe Audiolite.cs
 ```
 
-目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `DWrite` / `WinForms` 全程不加载——这是内存能压到 10 MB 的原因。
+目标运行时是系统内置的 .NET Framework 4.8.1,不下载、不附带运行时。`gdiplus` / `WinForms` 全程不加载——这是内存能压到 10 MB 的原因。
 
-测试(27 条,覆盖点击事件判定、设备命名编号、淡出序列):
+测试(37 条,覆盖点击事件判定、命名编号、状态位映射、淡出序列):
 
 ```powershell
-csc.exe -nologo -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+& $csc -nologo -noconfig -r:System.dll -target:exe -main:TestClicks -out:test.exe Audiolite.cs TestClicks.cs
 .\test.exe
-.\test.exe --leak     # 句柄增长检查
+.\test.exe --leak     # 句柄增长探针(目前只打印数字,不做断言)
 ```
 
 ## 已知边界
 
-- **接入时间属性是未公开的。** 排序用的 `{194ef948-…},2` 不在微软文档化的属性列表里。实测行为与"最近一次接入时间"一致(内置扬声器停在装机日、蓝牙耳机停在上次连接日),且已排除"上次设为默认时间"这一候选(设为默认不刷新它)。微软改语义的风险存在,但影响面只是菜单顺序,不影响切换正确性——真正用于切换的是 MMDevice ID。
+- **接入时间属性是未公开的。** 排序用的 `{194ef948-…},2` 不在微软文档化的属性列表里。实测行为与"最近一次接入时间"一致(内置扬声器停在装机日、蓝牙耳机停在上次连接日),且已排除"上次设为默认时间"这一候选(设为默认不刷新它)。**本机 16 个端点里只有 7 个带这个属性**,取不到的那些按安装时间排——回退路径才是多数路径。微软改语义的风险存在,但影响面只是菜单顺序,不影响切换正确性——真正用于切换的是 MMDevice ID。
+- **只切"控制台"和"多媒体"两个角色,不切"通信"。** 这和 Windows 自带音量浮窗的行为一致。显式按通信角色取设备的程序(Teams、YY 一类)输出不会跟着切。
 - **编号会随连接情况变化。** 这是"按在线设备重排"的必然结果:拔掉一台,后面的编号会前移。
 - **菜单不过滤虚拟音频设备。** 录屏、回环一类虚拟端点只要处于 active 就会出现在菜单里,需自行忽略。
 - **异常落盘。** `WndProc` 里的异常不静默吞掉,会记到 exe 同目录的 `diag.txt`,便于事后定位。
